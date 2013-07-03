@@ -1,0 +1,176 @@
+if VIDEO_MXC_CAMERA
+
+menu "MXC Camera/V4L2 PRP Features support"
+config VIDEO_MXC_IPU_CAMERA
+	bool
+	depends on VIDEO_MXC_CAMERA && MXC_IPU
+	default y
+
+config VIDEO_MXC_EMMA_CAMERA
+	tristate "MX27 eMMA support"
+	depends on VIDEO_MXC_CAMERA && MXC_EMMA && FB_MXC_SYNC_PANEL
+	select VIDEO_MXC_OPL
+	default y
+
+config VIDEO_MXC_CSI_CAMERA
+	tristate "CSI camera support"
+	depends on !VIDEO_MXC_EMMA_CAMERA
+
+config VIDEO_MXC_CSI_DMA
+	bool "CSI-DMA Still Image Capture support"
+	depends on VIDEO_MXC_EMMA_CAMERA
+	default n
+	---help---
+	  Use CSI-DMA method instead of CSI-PrP link to capture still image. This allows
+	  to use less physical contiguous memory to capture big resolution still image. But
+	  with this method the CSC (Color Space Conversion) and resize are not supported.
+	  If unsure, say N.
+
+config MXC_CAMERA_MC521DA
+	tristate "Magnachip mc521da camera support"
+	select I2C_MXC
+	depends on VIDEO_MXC_EMMA_CAMERA
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the mc521da Camera with your MXC system, say Y here.
+
+config MXC_EMMA_CAMERA_MICRON111
+	tristate "Micron mt9v111 camera support with eMMA"
+	select I2C_MXC
+	depends on VIDEO_MXC_EMMA_CAMERA
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the mt9v111 Camera with your MXC system, say Y here.
+
+config MXC_CAMERA_OV2640_EMMA
+	tristate "OmniVision ov2640 camera support with eMMA"
+	depends on VIDEO_MXC_EMMA_CAMERA
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the ov2640 Camera with your MXC system, say Y here.
+
+config MXC_CAMERA_MICRON111
+	tristate "Micron mt9v111 camera support"
+	select I2C_MXC
+	depends on ! VIDEO_MXC_EMMA_CAMERA
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the mt9v111 Camera with your MXC system, say Y here.
+
+config MXC_CAMERA_OV2640
+	tristate "OmniVision ov2640 camera support"
+	depends on !VIDEO_MXC_EMMA_CAMERA
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the ov2640 Camera with your MXC system, say Y here.
+
+config MXC_CAMERA_OV3640
+	tristate "OmniVision ov3640 camera support"
+	depends on !VIDEO_MXC_EMMA_CAMERA
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the ov3640 Camera with your MXC system, say Y here.
+
+config MXC_CAMERA_OV5640
+	tristate "OmniVision ov5640 camera support"
+	depends on !VIDEO_MXC_EMMA_CAMERA
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the ov5640 Camera with your MXC system, say Y here.
+
+config MXC_CAMERA_OV8820_MIPI
+	tristate "OmniVision ov8820 camera support using mipi"
+	depends on !VIDEO_MXC_EMMA_CAMERA
+	depends on ARCH_MX6Q
+	select MXC_MIPI_CSI2 if ARCH_MX6Q
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the ov8820 Camera with mipi interface in your MXC system, say Y here.
+
+config MXC_CAMERA_OV5642
+	tristate "OmniVision ov5642 camera support"
+	depends on !VIDEO_MXC_EMMA_CAMERA
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the ov5642 Camera with your MXC system, say Y here.
+
+config MXC_TVIN_ADV7180
+	tristate "Analog Device adv7180 TV Decoder Input support"
+	depends on (MACH_MX35_3DS || MACH_MX51_3DS || MACH_MX6Q_SABREAUTO || MACH_MX6Q_ARM2)
+	---help---
+	  If you plan to use the adv7180 video decoder with your MXC system, say Y here.
+
+
+config MXC_CAMERA_OV5640_MIPI
+	tristate "OmniVision ov5640 camera support using mipi"
+	depends on !VIDEO_MXC_EMMA_CAMERA
+	depends on ARCH_MX6Q
+	select MXC_MIPI_CSI2 if ARCH_MX6Q
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the ov5640 Camera with mipi interface in your MXC system, say Y here.
+
+config MXC_MIPI_CSI2_TVIN_ADV7280
+	tristate "Analog Devices adv7280 TV Decoder Input support using mipi-csi2"
+	depends on (!VIDEO_MXC_EMMA_CAMERA)
+	depends on ARCH_MX6Q
+	select MXC_MIPI_CSI2 if ARCH_MX6Q
+	select MXC_CAMERA_SENSOR_CLK
+	---help---
+	  If you plan to use the adv7280 device with mipi-csi2 interface
+	  in your iMX6 system, say Y here.
+
+config MXC_CAMERA_SENSOR_CLK
+	tristate "camera clock"
+	depends on !VIDEO_MXC_EMMA_CAMERA
+	---help---
+	  If you plan to use the Camera with your MXC system, say Y here.
+
+choice
+	prompt "Select Overlay Rounting"
+	default MXC_IPU_DEVICE_QUEUE_SDC
+	depends on VIDEO_MXC_IPU_CAMERA && FB_MXC_SYNC_PANEL
+
+config MXC_IPU_DEVICE_QUEUE_SDC
+	tristate "Queue ipu device for overlay library"
+	depends on VIDEO_MXC_IPU_CAMERA
+	---help---
+	  Use case CSI->MEM->IPU DEVICE->SDC:
+		Images from sensor will be frist recieved in memory,then
+		queue to ipu device for processing if needed, and displaying
+		it on synchronous display with SDC use case.
+
+config MXC_IPU_PRP_VF_SDC
+	bool "Pre-Processor VF SDC library"
+	depends on VIDEO_MXC_IPU_CAMERA
+	---help---
+	  Use case PRP_VF_SDC:
+		Preprocessing image from smart sensor for viewfinder and
+		displaying it on synchronous display with SDC use case.
+		If SDC BG is selected, Rotation will not be supported.
+		CSI -> IC (PRP VF) -> MEM
+		MEM -> IC (ROT) -> MEM
+		MEM -> SDC (FG/BG)
+
+endchoice
+
+config MXC_IPU_PRP_ENC
+	tristate "Pre-processor Encoder library"
+	depends on VIDEO_MXC_IPU_CAMERA
+	default y
+	---help---
+	  Use case PRP_ENC:
+		Preprocessing image from smart sensor for encoder.
+		CSI -> IC (PRP ENC) -> MEM
+
+config MXC_IPU_CSI_ENC
+	tristate "IPU CSI Encoder library"
+	depends on VIDEO_MXC_IPU_CAMERA
+	default y
+	---help---
+	  Use case IPU_CSI_ENC:
+		Get raw image with CSI from smart sensor for encoder.
+		CSI -> MEM
+endmenu
+
+endif

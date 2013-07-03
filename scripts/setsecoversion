@@ -1,0 +1,30 @@
+#!/bin/sh
+#
+# This scripts adds SECO local version information from the version
+# control systems git, mercurial (hg) and subversion (svn).
+#
+
+usage() {
+	echo "Usage: $0 [srctree]" >&2
+	exit 1
+}
+
+if test $# -gt 0; then
+	srctree=$1
+	shift
+fi
+if test $# -gt 0 -o ! -d "$srctree"; then
+	usage
+fi
+
+rev=""
+# Check for svn and a svn repo.
+if rev=`svn info 2>/dev/null | grep '^Last Changed Rev'`; then
+	rev=`echo $rev | awk '{print $NF}'`
+else
+	if test -e "$srctree"/scripts/secoversion; then
+		rev="$(cat $srctree/scripts/secoversion)"
+	fi
+fi
+
+printf -- '%s' "$rev"

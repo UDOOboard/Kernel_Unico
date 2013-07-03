@@ -1,0 +1,16 @@
+#
+# SECO system driver
+#
+
+menu "SECO_MXC_SYSTEM"
+
+config MSP430
+        bool "Comunication system with MSP430"
+        depends on I2C && Q7_MSP430
+        help
+          Say Y here if you want to use the Seco Comnunication System with MSP430.
+
+	      If unsure, say Y.
+
+endmenu
+

@@ -1,0 +1,59 @@
+* How to test remote wakeup (Make sure connecting to usb host and gadget is loaded)
+1. Prepare a usb host which featured with remote wakeup
+alternatively, You can use another i.mx board (like mx50 rdp, or mx6q)
+2. Boot up both boards, and connect two boards with usb cable
+3. At device side, do below commands:
+- modprobe g_file_storage file=/dev/mmcblk0p1 (other gadgets are also ok)
+- echo 1 > /sys/devices/platform/fsl-usb2-udc/gadget/remote_wakeup
+4. At host side, do below command:
+- echo enabled > /sys/devices/platform/fsl-ehci.1/power/wakeup
+- echo standby > /sys/power/state
+5. Send Remote wakeup to wake up host
+At device side, do below command:
+echo 1 > /sys/devices/platform/fsl-usb2-udc/gadget/start_remote_wakeup
+6. The expected behaviour is: host is waked up, and there is
+not re-enumeration happens.
+
+* How to test usb audio gadget
+1. Test Condition
+- Host PC, only Macbook Pro (Mac OS 10.6.5+) & Ubuntu 10.10 (Linux 2.6.38+)
+are supported, Windows OS are not supported now.
+- One USB MicroAB cable and one earphone
+2. Test procedure
+- Power up the board
+- Login in rootfs, load usb audio module with below commands:
+modprobe g_audio req_count=20 audio_buf_size=8192 audio_sample_rate=44100
+- Connect board with PC using MicroAB cable
+- For Ubuntu PC, you can use aplay -l to get the sound card num for this
+usb audio gadget, usually the number is 1. For Macbook, you need to choose
+"Linux USB Audio Gadget" on the "Sound"->"Output" tab of System Preferences.
+- Choose several 44.1Khz wav file to play, you can use aplay or iTune according
+to different PCs.
+3. Constraints
+Since there is no feedback at current usb audio framework,
+it may have pop noise/no sound after play some minutes.
+
+How to test auto remote wakeup with the g_zero gadget
+1. Prepare a USB host which featured with remote wakeup alternatively, You can
+use another i.mx board (like mx50 rdp, or mx6q) for test device board.
+2. Boot up both boards, and connect two boards with USB cable.
+3. At device side, do below commands:
+modprobe g_zero autoresume=3000 interval=1 endms=5000
+we can use the above three parameters to control device send resume signal time.
+Autoresume is the minimum number of milliseconds before sending resume signal,
+and the time before sending resume signal will automatically increase according
+to interval value,the endms is the max number of  milliseconds before sending
+resume signal.When autoresume is 0 or not be set,the test device auto remote
+wakeup function will be disabled.
+4. At host side, first do below command:
+echo enabled > /sys/devices/platform/fsl-ehci.1/power/wakeup
+echo enabled > /sys/bus/usb/devices/1-1/power/wakeup
+And you need build a test script to repeat standby the system like below:
+while [ 1 ] ;do echo mem  > /sys/power/state;sleep 5 ;done
+Then run the test script.
+5. Then USB device will enter the suspended state ,and autoresume
+milliseconds later,the device will send resume signal to wake up host.
+6. The expected behavior is: the host device be waked up, and there is not
+re-enumeration happens.
+7. The host will enter suspended state again,and test case will repeat step
+5 and step 6.
