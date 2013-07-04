@@ -1,25 +1,36 @@
 #include <mach/iomux-mx6dl.h>
 
 
-#define REVB
+//#define REVB
 #define INTERNAL_SERIAL_ENABLED
 
 
-/*  SPEGAZIONE MACRO IOMUXPAD
-*	indirizzo mux, indirizzo pad, mux, 0x0000, 0, valori per pad
+/******************************************************************
+*	 DEFINIZIONE MACRO CUSTOM PER UDOO
 *
-*/
-#define MX6DL_PAD_DISP0_DAT0__GPIO_4_21_PULLDOWN	\
-		(IOMUX_PAD(0x03C4, 0x00B0, 5, 0x0000, 0, 0x30B0))  
+*    Spiegazione IOMUXPAD
+*	 (indirizzo mux, indirizzo pad, mux, 0x0000, 0, valori per pad)
+******************************************************************/
 
+// ERASE ARDUINO
+#define MX6DL_PAD_DISP0_DAT0__GPIO_4_21_PULLDOWN	\
+		(IOMUX_PAD(0x03C4, 0x00B0, 5, 0x0000, 0, 0x30B1))  
+
+// INTERRUPT TOUCH REV C
 #define MX6DL_PAD_SD2_DAT2__GPIO_1_13_47KPULLUPPED \
 		(MX6DL_PAD_SD2_DAT2__GPIO_1_13 | MUX_PAD_CTRL(PAD_CTL_PUS_47K_UP))
 
+// INTERRUPT TOUCH REV B
 #define MX6DL_PAD_SD1_CLK__GPIO_1_20_47KPULLUPPED \
 		(MX6DL_PAD_SD1_CLK__GPIO_1_20 | MUX_PAD_CTRL(PAD_CTL_PUS_47K_UP))
 
+// SAM3x OTG VBUS EN
 #define MX6DL_PAD_GPIO_16__GPIO_7_11_CORRECT \
 		(IOMUX_PAD(0x0214, 0x05E4, 5, 0x0000, 0, 0xB0B1))
+
+// ARDUINO PINOUT PIN12
+#define MX6Q_PAD_GPIO_3__GPIO_1_3_PULLDOWN \
+		(IOMUX_PAD(0x0228, 0x05F8, 5, 0x0000, 0, 0x30B1))
 
 
 

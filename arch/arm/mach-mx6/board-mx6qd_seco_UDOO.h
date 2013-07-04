@@ -1,60 +1,37 @@
+#include <mach/iomux-mx6q.h>
+
 // Pinmuxing options
 #define INTERNAL_SERIAL_ENABLED
 //#define PIN_38_PER_TEST_ACCENDI_SPEGNI
 
 
-#include <mach/iomux-mx6q.h>
+/******************************************************************
+*	 DEFINIZIONE MACRO CUSTOM PER UDOO
+*
+*    Spiegazione IOMUXPAD
+*	 (indirizzo mux, indirizzo pad, mux, 0x0000, 0, valori per pad)
+******************************************************************/
 
-
-#define MX6Q_PAD_GPIO_7_ODE                         (PAD_CTL_ODE)
-#define MX6Q_PAD_GPIO_0_ODE                         (PAD_CTL_ODE)
-#define MX6Q_PAD_NAND_DATA05_ODE                    (PAD_CTL_ODE)
-#define MX6Q_PAD_NAND_DATA07_ODE                    (PAD_CTL_ODE)
-#define MX6Q_PAD_NANDF_CS2_CCM_CLK02_24MHZ          (1 << 24 | 0x7 << 17)
-#define MX6Q_PAD_DISP0_DAT0_GPIO_4_21_ODE           (PAD_CTL_ODE)
-
-
-/*
-*	 definizione macro customizzate
-*/
-#define MX6Q_PAD_GPIO_7__GPIO_1_7_OPEN_DRAIN \
-		(_MX6Q_PAD_GPIO_7__GPIO_1_7 | MUX_PAD_CTRL(MX6Q_PAD_GPIO_7_ODE) | MUX_PAD_CTRL(PAD_CTL_PUS_47K_UP))
-
-#define  MX6Q_PAD_GPIO_0__GPIO_1_0_OPEN_DRAIN		\
-		(MX6Q_PAD_GPIO_0__GPIO_1_0 | MUX_PAD_CTRL(MX6Q_PAD_GPIO_0_ODE))
-
-#define  MX6Q_PAD_NANDF_D5__GPIO_2_5_OPEN_DRAIN		\
-		(_MX6Q_PAD_NANDF_D5__GPIO_2_5 | MUX_PAD_CTRL(MX6Q_PAD_NAND_DATA05_ODE))
-
-#define  MX6Q_PAD_SD4_DAT7__GPIO_2_15_OPEN_DRAIN	\
-		(_MX6Q_PAD_SD4_DAT7__GPIO_2_15 | MUX_PAD_CTRL(MX6Q_PAD_NAND_DATA07_ODE ))
-
-#define  MX6Q_PAD_NANDF_CS2__CCM_CLKO2_24MHZ		\
-		(MX6Q_PAD_NANDF_CS2__CCM_CLKO2 | MUX_PAD_CTRL(MX6Q_PAD_NANDF_CS2_CCM_CLK02_24MHZ))
-
-#define MX6Q_PAD_DISP0_DAT0__GPIO_4_21_OPEN_DRAIN	\
-		(IOMUX_PAD(0x0484, 0x0170, 5, 0x0000, 0, MX6Q_DISP0_DAT0_PAD_CTRL_ODE))  
-
+// ERASE ARDUINO
 #define MX6Q_PAD_DISP0_DAT0__GPIO_4_21_PULLDOWN	\
-		(IOMUX_PAD(0x0484, 0x0170, 5, 0x0000, 0, 0x30B0))
+		(IOMUX_PAD(0x0484, 0x0170, 5, 0x0000, 0, 0x30B1))
 
+// INTERRUPT TOUCH
 #define MX6Q_PAD_SD2_DAT2__GPIO_1_13_47KPULLUPPED \
 		(MX6Q_PAD_SD2_DAT2__GPIO_1_13 | MUX_PAD_CTRL(PAD_CTL_PUS_47K_UP))
 
+// USB OTG SELECTOR
 #define MX6Q_PAD_EIM_WAIT__GPIO_5_0_CORRECT \
 		(IOMUX_PAD(0x0154, 0x0468, 5, 0x0000, 0, 0xB0B1))
 
+// SAM3x OTG VBUS EN
 #define MX6Q_PAD_GPIO_16__GPIO_7_11_CORRECT \
 		(IOMUX_PAD(0x0248, 0x0618, 5, 0x0000, 0, 0xB0B1))
 
+// ARDUINO PINOUT PIN12
 #define MX6Q_PAD_GPIO_3__GPIO_1_3_PULLDOWN \
-		(IOMUX_PAD(0x022C, 0x05FC, 5, 0x0000, 0, 0x30B0))
+		(IOMUX_PAD(0x022C, 0x05FC, 5, 0x0000, 0, 0x30B1))
 
-
-/*  SPEGAZIONE IOMUXPAD
-*	indirizzo mux, indirizzo pad, mux, 0x0000, 0, valori per pad
-*
-*/
 
 
 // Definizione gpios per connessioni interne rev c
