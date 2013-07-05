@@ -66,8 +66,7 @@
 /* status codes for reading edid */
 #define HDMI_EDID_SUCCESS	0
 #define HDMI_EDID_FAIL		-1
-#define HDMI_EDID_SAME		-2
-#define HDMI_EDID_NO_MODES	-3
+#define HDMI_EDID_NO_MODES	-2
 
 #define NUM_CEA_VIDEO_MODES	64
 #define DEFAULT_VIDEO_MODE	16 /* 1080P */
@@ -193,7 +192,6 @@ struct i2c_client *hdmi_i2c;
 
 static bool hdmi_inited;
 
-extern const struct fb_videomode mxc_cea_mode[64];
 extern void mxc_hdmi_cec_handle(u16 cec_stat);
 
 static void mxc_hdmi_setup(struct mxc_hdmi *hdmi, unsigned long event);
@@ -1438,11 +1436,6 @@ static int mxc_hdmi_read_edid(struct mxc_hdmi *hdmi)
 	/* Save edid cfg for audio driver */
 	hdmi_set_edid_cfg(&hdmi->edid_cfg);
 
-	if (!memcmp(edid_old, hdmi->edid, HDMI_EDID_LEN)) {
-		dev_info(&hdmi->pdev->dev, "same edid\n");
-		return HDMI_EDID_SAME;
-	}
-
 	if (hdmi->fbi->monspecs.modedb_len == 0) {
 		dev_info(&hdmi->pdev->dev, "No modes read from edid\n");
 		return HDMI_EDID_NO_MODES;
@@ -1595,8 +1588,7 @@ static void mxc_hdmi_edid_rebuild_modelist(struct mxc_hdmi *hdmi)
 		 */
 		mode = &hdmi->fbi->monspecs.modedb[i];
 
-		if (!(mode->vmode & FB_VMODE_INTERLACED) &&
-				(mxc_edid_mode_to_vic(mode) != 0)) {
+		if (!(mode->vmode & FB_VMODE_INTERLACED)) {
 
 			dev_dbg(&hdmi->pdev->dev, "Added mode %d:", i);
 			dev_dbg(&hdmi->pdev->dev,
@@ -1639,13 +1631,6 @@ static void  mxc_hdmi_default_modelist(struct mxc_hdmi *hdmi)
 	fb_add_videomode(&vga_mode, &hdmi->fbi->modelist);
 	fb_add_videomode(&xga_mode, &hdmi->fbi->modelist);
 	fb_add_videomode(&sxga_mode, &hdmi->fbi->modelist);
-
-	/*Add all no interlaced CEA mode to default modelist */
-	for (i = 0; i < ARRAY_SIZE(mxc_cea_mode); i++) {
-		mode = &mxc_cea_mode[i];
-		if (!(mode->vmode & FB_VMODE_INTERLACED) && (mode->xres != 0))
-			fb_add_videomode(mode, &hdmi->fbi->modelist);
-	}
 
 	console_unlock();
 }
@@ -1734,10 +1719,6 @@ static void mxc_hdmi_cable_connected(struct mxc_hdmi *hdmi)
 	switch (edid_status) {
 	case HDMI_EDID_SUCCESS:
 		mxc_hdmi_edid_rebuild_modelist(hdmi);
-		break;
-
-	/* Nothing to do if EDID same */
-	case HDMI_EDID_SAME:
 		break;
 
 	case HDMI_EDID_FAIL:
@@ -2266,13 +2247,6 @@ static int mxc_hdmi_disp_init(struct mxc_dispdrv_handle *disp,
 
 	fb_destroy_modelist(&hdmi->fbi->modelist);
 
-	/*Add all no interlaced CEA mode to default modelist */
-	for (i = 0; i < ARRAY_SIZE(mxc_cea_mode); i++) {
-		mode = &mxc_cea_mode[i];
-		if (!(mode->vmode & FB_VMODE_INTERLACED) && (mode->xres != 0))
-			fb_add_videomode(mode, &hdmi->fbi->modelist);
-	}
-
 	/*Add XGA and SXGA to default modelist */
 	fb_add_videomode(&xga_mode, &hdmi->fbi->modelist);
 	fb_add_videomode(&sxga_mode, &hdmi->fbi->modelist);
@@ -2527,3 +2501,4 @@ module_init(mxc_hdmi_i2c_init);
 module_exit(mxc_hdmi_i2c_exit);
 
 MODULE_AUTHOR("Freescale Semiconductor, Inc.");
+
