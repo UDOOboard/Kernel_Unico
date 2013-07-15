@@ -9,7 +9,7 @@
 *	 DEFINIZIONE MACRO CUSTOM PER UDOO
 *
 *    Spiegazione IOMUXPAD
-*	 (indirizzo mux, indirizzo pad, mux, 0x0000, 0, valori per pad)
+*	 (indirizzo pad, indirizzo mux, mux, 0x0000, 0, valori per pad)
 ******************************************************************/
 
 // ERASE ARDUINO
@@ -17,7 +17,7 @@
 		(IOMUX_PAD(0x03C4, 0x00B0, 5, 0x0000, 0, 0x30B1))  
 
 // ARDUINO PINOUT PIN12
-#define MX6Q_PAD_GPIO_3__GPIO_1_3_PULLDOWN \
+#define MX6DL_PAD_GPIO_3__GPIO_1_3_PULLDOWN \
 		(IOMUX_PAD(0x05F8, 0x0228, 5, 0x0000, 0, 0x30B1))
 
 // INTERRUPT TOUCH REV C
@@ -57,6 +57,9 @@
 #define MX6DL_PAD_CSIO_DAT17__GPIO_MODE	IMX_GPIO_NR(6, 3)  
 #define MX6DL_PAD_NANDF_D4__GPIO_MODE	IMX_GPIO_NR(2, 4)  
 #define MX6DL_PAD_EIM_A19__GPIO_MODE		IMX_GPIO_NR(2, 19) 
+
+#define MX6DL_PAD_KEY_ROW0__GPIO_MODE	IMX_GPIO_NR(4, 7)
+#define MX6DL_PAD_KEY_COL0__GPIO_MODE	IMX_GPIO_NR(4, 6)
 
 // TUTTI I PIN ESTERNI impostati come gpios
 #define	MX6DL_PAD_CSI0_DAT11__GPIO_MODE  	IMX_GPIO_NR(5, 29)
@@ -122,8 +125,6 @@
 
 #define MX6DL_PAD_GPIO_7__GPIO_MODE		IMX_GPIO_NR(1, 7)	
 #define MX6DL_PAD_GPIO_8__GPIO_MODE		IMX_GPIO_NR(1, 8)	
-
-#define MX6DL_PAD_SD2_CMD__GPIO_MODE	IMX_GPIO_NR(1, 20)
 
 
 static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
@@ -221,7 +222,7 @@ static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
 
 
 	/* 
-	*	Pinmuxing interno rev.4c DUAL
+	*	Pinmuxing interno rev.C DUAL
 	*/
 
 #ifdef REVB
@@ -272,10 +273,13 @@ static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
 #ifdef INTERNAL_SERIAL_ENABLED
 	MX6DL_PAD_KEY_ROW0__UART4_RXD,		// UART4 - seriale tra imx6 --> sam3x
 	MX6DL_PAD_KEY_COL0__UART4_TXD,		// UART4 - seriale tra imx6 --> sam3x
+#else
+	MX6DL_PAD_KEY_ROW0__GPIO_4_7,		// impostati come gpio input 
+	MX6DL_PAD_KEY_COL0__GPIO_4_6,		// impostati come gpio input 
 #endif
 
 	/* 
-	*	Pinmuxing esterno rev.4c DUAL
+	*	Pinmuxing esterno rev.C DUAL
 	*
 	*/
 
@@ -339,7 +343,7 @@ static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
 		// MX6DL_PAD_GPIO_9__PWM1_PWMO,	   
 		// MX6DL_PAD_GPIO_9__USDHC1_WP,	
 	
-	MX6DL_PAD_GPIO_3__GPIO_1_3,
+	MX6DL_PAD_GPIO_3__GPIO_1_3_PULLDOWN,
 	MX6DL_PAD_SD4_DAT0__GPIO_2_8,
 
 	MX6DL_PAD_EIM_D21__GPIO_3_21,
@@ -486,6 +490,11 @@ static unsigned int mx6dl_set_in_inputmode[] = {
 	MX6DL_PAD_SD1_DAT0__GPIO_MODE,
 #endif
 
+#ifndef INTERNAL_SERIAL_ENABLED	
+	MX6DL_PAD_KEY_ROW0__GPIO_MODE,
+	MX6DL_PAD_KEY_COL0__GPIO_MODE,
+#endif
+
 	MX6DL_PAD_GPIO_7__GPIO_MODE,
 	MX6DL_PAD_CSI0_DAT10__GPIO_MODE,
 	MX6DL_PAD_CSI0_DAT11__GPIO_MODE,	
@@ -556,16 +565,17 @@ static unsigned int mx6dl_set_in_inputmode[] = {
 
 };
 
-
+/*
 static iomux_v3_cfg_t mx6dl_seco_q7_hdmi_ddc_pads[] = {
-	MX6DL_PAD_KEY_COL3__HDMI_TX_DDC_SCL, /* HDMI DDC SCL */
-	MX6DL_PAD_KEY_ROW3__HDMI_TX_DDC_SDA, /* HDMI DDC SDA */
+	MX6DL_PAD_KEY_COL3__HDMI_TX_DDC_SCL, // HDMI DDC SCL 
+	MX6DL_PAD_KEY_ROW3__HDMI_TX_DDC_SDA, // HDMI DDC SDA 
 };
 
 static iomux_v3_cfg_t mx6dl_seco_q7_i2c2_pads[] = {
-	MX6DL_PAD_KEY_COL3__I2C2_SCL,	/* I2C2 SCL */
-	MX6DL_PAD_KEY_ROW3__I2C2_SDA,	/* I2C2 SDA */
+	MX6DL_PAD_KEY_COL3__I2C2_SCL,	// I2C2 SCL 
+	MX6DL_PAD_KEY_ROW3__I2C2_SDA,	// I2C2 SDA 
 };
+*/
 
 #define MX6DL_USDHC_PAD_SETTING(id, speed)	\
 mx6dl_sd##id##_##speed##mhz[] = {		\

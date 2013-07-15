@@ -14,7 +14,7 @@
 
 // ERASE ARDUINO
 #define MX6Q_PAD_DISP0_DAT0__GPIO_4_21_PULLDOWN	\
-		(IOMUX_PAD(0x0484, 0x0170, 5, 0x0000, 0, 0x30B1))
+		(IOMUX_PAD(0x0484, 0x0170, 5, 0x0000, 0, 0x30B1)
 
 // ARDUINO PINOUT PIN12
 #define MX6Q_PAD_GPIO_3__GPIO_1_3_PULLDOWN \
@@ -58,6 +58,9 @@
 #define MX6Q_PAD_CSIO_DAT17__GPIO_MODE	IMX_GPIO_NR(6, 3)  
 #define MX6Q_PAD_NANDF_D4__GPIO_MODE	IMX_GPIO_NR(2, 4)  
 #define MX6Q_PAD_EIM_A19__GPIO_MODE		IMX_GPIO_NR(2, 19) 
+
+#define MX6Q_PAD_KEY_ROW0__GPIO_MODE	IMX_GPIO_NR(4, 7)
+#define MX6Q_PAD_KEY_COL0__GPIO_MODE	IMX_GPIO_NR(4, 6)
 
 // TUTTI I PIN ESTERNI impostati come gpios
 #define	MX6Q_PAD_CSI0_DAT11__GPIO_MODE  	IMX_GPIO_NR(5, 29)
@@ -214,8 +217,9 @@ static iomux_v3_cfg_t mx6qd_seco_UDOO_pads[] = {
 	MX6Q_PAD_GPIO_5__I2C3_SCL,		/*I2C3_SCL*/ //    - for I2C3
 
 	/* 
-	*	Pinmuxing interno rev.4c QUAD
+	*	Pinmuxing interno rev.C QUAD
 	*/
+
 	MX6Q_PAD_SD2_DAT0__GPIO_1_15,		// reset del touch (attivo basso)
 	MX6Q_PAD_SD2_DAT2__GPIO_1_13_47KPULLUPPED,		// interrupt del touch
 	MX6Q_PAD_EIM_EB2__GPIO_2_30,		// nuovo reset audio
@@ -243,9 +247,14 @@ static iomux_v3_cfg_t mx6qd_seco_UDOO_pads[] = {
 	#ifdef INTERNAL_SERIAL_ENABLED
 		MX6Q_PAD_KEY_ROW0__UART4_RXD,		// UART4 - seriale tra imx6 --> sam3x
 		MX6Q_PAD_KEY_COL0__UART4_TXD,		// UART4 - seriale tra imx6 --> sam3x
+	#else
+		MX6Q_PAD_KEY_ROW0__GPIO_4_7,		// impostati come gpio input 
+		MX6Q_PAD_KEY_COL0__GPIO_4_6,		// impostati come gpio input 
 	#endif
+
+
 	/* 
-	*	Pinmuxing esterno rev.4c QUAD
+	*	Pinmuxing esterno rev.C QUAD
 	*/
 
 	MX6Q_PAD_CSI0_DAT10__GPIO_5_28,
@@ -437,6 +446,10 @@ static unsigned int mx6q_set_in_inputmode[] = {
 	MX6Q_PAD_CSIO_PIXCLK__GPIO_MODE,	
 	MX6Q_PAD_CSIO_DAT17__GPIO_MODE,	
 
+#ifndef INTERNAL_SERIAL_ENABLED	
+	MX6Q_PAD_KEY_ROW0__GPIO_MODE,
+	MX6Q_PAD_KEY_COL0__GPIO_MODE,
+#endif
 
 	//esterni rev c	
 	MX6Q_PAD_CSI0_DAT10__GPIO_MODE,
