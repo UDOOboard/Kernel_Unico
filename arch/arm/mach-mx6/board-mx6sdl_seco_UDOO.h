@@ -1,8 +1,12 @@
 #include <mach/iomux-mx6dl.h>
 
 
-//#define REVB
+#ifdef CONFIG_UDOO_DUAL_REVB
+	#define REVB
+#endif
+
 #define INTERNAL_SERIAL_ENABLED
+#define COLLAUDO_GPIO
 
 
 /******************************************************************
@@ -45,7 +49,7 @@
 #define MX6DL_PAD_GPIO_4__GPIO_MODE		IMX_GPIO_NR(1, 4)  
 #define MX6DL_PAD_EIM_WAIT__GPIO_MODE	IMX_GPIO_NR(5, 0)  
 #define MX6DL_PAD_GPIO_16__GPIO_MODE		IMX_GPIO_NR(7, 11) 
-#define MX6DL_PAD_GPIO_17__GPIO_MODE		IMX_GPIO_NR(7, 12)  // fallisce l'export
+#define MX6DL_PAD_GPIO_17__GPIO_MODE		IMX_GPIO_NR(7, 12)  
 #define MX6DL_PAD_NANDF_CS0__GPIO_MODE	IMX_GPIO_NR(6, 11)
 #define MX6DL_PAD_NANDF_D5__GPIO_MODE	IMX_GPIO_NR(2, 5)  
 #define MX6DL_PAD_SD4_DAT7__GPIO_MODE	IMX_GPIO_NR(2, 15) 
@@ -57,6 +61,7 @@
 #define MX6DL_PAD_CSIO_DAT17__GPIO_MODE	IMX_GPIO_NR(6, 3)  
 #define MX6DL_PAD_NANDF_D4__GPIO_MODE	IMX_GPIO_NR(2, 4)  
 #define MX6DL_PAD_EIM_A19__GPIO_MODE		IMX_GPIO_NR(2, 19) 
+#define MX6DL_PAD_SD2_CMD__GPIO_MODE IMX_GPIO_NR(1, 11)
 
 #define MX6DL_PAD_KEY_ROW0__GPIO_MODE	IMX_GPIO_NR(4, 7)
 #define MX6DL_PAD_KEY_COL0__GPIO_MODE	IMX_GPIO_NR(4, 6)
@@ -125,6 +130,9 @@
 
 #define MX6DL_PAD_GPIO_7__GPIO_MODE		IMX_GPIO_NR(1, 7)	
 #define MX6DL_PAD_GPIO_8__GPIO_MODE		IMX_GPIO_NR(1, 8)	
+
+#define MX6DL_PAD_GPIO_5__GPIO_MODE		IMX_GPIO_NR(1, 5)	
+#define MX6DL_PAD_GPIO_6__GPIO_MODE		IMX_GPIO_NR(1, 6)
 
 
 static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
@@ -278,6 +286,11 @@ static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
 	MX6DL_PAD_KEY_COL0__GPIO_4_6,		// impostati come gpio input 
 #endif
 
+#ifdef COLLAUDO_GPIO
+	MX6DL_PAD_GPIO_5__GPIO_1_5,		//i2c3_scl  messi come gpio per test collaudo
+	MX6DL_PAD_GPIO_6__GPIO_1_6,		//i2c3_sda
+#endif
+
 	/* 
 	*	Pinmuxing esterno rev.C DUAL
 	*
@@ -329,7 +342,7 @@ static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
 		// MX6DL_PAD_SD1_DAT3__WDOG2_WDOG_RST_B_DEB,	
 
 	MX6DL_PAD_SD1_DAT2__GPIO_1_19,
-		// MX6DL_PAD_SD1_DAT2__PWM2_PWMO,      NANDF_D4
+		// MX6DL_PAD_SD1_DAT2__PWM2_PWMO,      
 		// MX6DL_PAD_SD1_DAT2__USDHC1_DAT2,	
 		// MX6DL_PAD_SD1_DAT2__ECSPI5_SS1,
 		// MX6DL_PAD_SD1_DAT2__GPT_CMPOUT2,		
@@ -445,9 +458,7 @@ static unsigned int mx6dl_set_in_outputmode_low[] = {
 	MX6DL_PAD_EIM_A19__GPIO_MODE,
 	MX6DL_PAD_SD4_DAT7__GPIO_MODE,	
 	MX6DL_PAD_CSIO_DAT18__GPIO_MODE, // camera attivo alto
-#ifndef REVB
-	MX6DL_PAD_NANDF_D4__GPIO_MODE, // spegne la 5v quando va in suspend
-#else
+#ifdef REVB
 	MX6DL_PAD_GPIO_8__GPIO_MODE, // connette l'otg verso l'esterno
 #endif
 
@@ -459,7 +470,7 @@ static unsigned int mx6dl_set_in_outputmode_high[] = {
 	MX6DL_PAD_GPIO_2__GPIO_MODE,	// lvds PANEL_ON	
 	MX6DL_PAD_GPIO_4__GPIO_MODE,	// backlight lvds ****
 	MX6DL_PAD_GPIO_16__GPIO_MODE,   // alimentazione bus otg del sam3x 1 per adk
-	MX6DL_PAD_GPIO_17__GPIO_MODE, 	// Segnale di reset per l'hub usb2514, (attivo basso) ****
+	//MX6DL_PAD_GPIO_17__GPIO_MODE, 	// Segnale di reset per l'hub usb2514, (attivo basso) ****
 	MX6DL_PAD_NANDF_D5__GPIO_MODE,	// abilita alimentazione dell sdcard	
 #ifndef REVB
 	MX6DL_PAD_NANDF_CS0__GPIO_MODE,
@@ -483,7 +494,7 @@ static unsigned int mx6dl_set_in_inputmode[] = {
 	MX6DL_PAD_CSIO_PIXCLK__GPIO_MODE,	
 	MX6DL_PAD_CSIO_DAT17__GPIO_MODE,	
 #ifdef REVB
-	MX6DL_PAD_NANDF_D4__GPIO_MODE, // spegne la 5v quando va in suspend
+	MX6DL_PAD_NANDF_D4__GPIO_MODE, 
 	MX6DL_PAD_DISP0_DAT4__GPIO_MODE, 
 #else
 	MX6DL_PAD_GPIO_8__GPIO_MODE,
@@ -493,6 +504,11 @@ static unsigned int mx6dl_set_in_inputmode[] = {
 #ifndef INTERNAL_SERIAL_ENABLED	
 	MX6DL_PAD_KEY_ROW0__GPIO_MODE,
 	MX6DL_PAD_KEY_COL0__GPIO_MODE,
+#endif
+
+#ifdef COLLAUDO_GPIO
+	MX6DL_PAD_GPIO_5__GPIO_MODE,	//i2c3_scl  messi come gpio per test collaudo
+	MX6DL_PAD_GPIO_6__GPIO_MODE, 	//i2c3_sda 
 #endif
 
 	MX6DL_PAD_GPIO_7__GPIO_MODE,

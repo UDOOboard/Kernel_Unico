@@ -3,6 +3,7 @@
 // Pinmuxing options
 #define INTERNAL_SERIAL_ENABLED
 //#define PIN_38_PER_TEST_ACCENDI_SPEGNI
+#define COLLAUDO_GPIO
 
 
 /******************************************************************
@@ -125,6 +126,9 @@
 #define MX6Q_PAD_GPIO_7__GPIO_MODE		IMX_GPIO_NR(1, 7)	
 #define MX6Q_PAD_GPIO_8__GPIO_MODE		IMX_GPIO_NR(1, 8)	
 
+#define MX6Q_PAD_GPIO_5__GPIO_MODE		IMX_GPIO_NR(1, 5)	
+#define MX6Q_PAD_GPIO_6__GPIO_MODE		IMX_GPIO_NR(1, 6)
+
 
 static iomux_v3_cfg_t mx6qd_seco_UDOO_pads[] = {
 
@@ -214,8 +218,7 @@ static iomux_v3_cfg_t mx6qd_seco_UDOO_pads[] = {
 	MX6Q_PAD_KEY_COL3__I2C2_SCL,		/*I2C2_SCL*/	//    - for I2C
 	MX6Q_PAD_KEY_ROW3__I2C2_SDA,		/*I2C2_SDA*/	//    - for I2C
 
-	MX6Q_PAD_GPIO_5__I2C3_SCL,		/*I2C3_SCL*/ //    - for I2C3
-
+	
 	/* 
 	*	Pinmuxing interno rev.C QUAD
 	*/
@@ -244,14 +247,18 @@ static iomux_v3_cfg_t mx6qd_seco_UDOO_pads[] = {
 	MX6Q_PAD_EIM_A19__GPIO_2_19,		// Livello logico 1 = non protetta 0= flash protetta contro le scritture
 	MX6Q_PAD_EIM_WAIT__GPIO_5_0_CORRECT,
 
-	#ifdef INTERNAL_SERIAL_ENABLED
-		MX6Q_PAD_KEY_ROW0__UART4_RXD,		// UART4 - seriale tra imx6 --> sam3x
-		MX6Q_PAD_KEY_COL0__UART4_TXD,		// UART4 - seriale tra imx6 --> sam3x
-	#else
-		MX6Q_PAD_KEY_ROW0__GPIO_4_7,		// impostati come gpio input 
-		MX6Q_PAD_KEY_COL0__GPIO_4_6,		// impostati come gpio input 
-	#endif
+#ifdef INTERNAL_SERIAL_ENABLED
+	MX6Q_PAD_KEY_ROW0__UART4_RXD,		// UART4 - seriale tra imx6 --> sam3x
+	MX6Q_PAD_KEY_COL0__UART4_TXD,		// UART4 - seriale tra imx6 --> sam3x
+#else
+	MX6Q_PAD_KEY_ROW0__GPIO_4_7,		// impostati come gpio input 
+	MX6Q_PAD_KEY_COL0__GPIO_4_6,		// impostati come gpio input 
+#endif
 
+#ifdef COLLAUDO_GPIO
+	MX6Q_PAD_GPIO_5__GPIO_1_5,		//i2c3_scl  messi come gpio per test collaudo
+	MX6Q_PAD_GPIO_6__GPIO_1_6,		//i2c3_sda
+#endif
 
 	/* 
 	*	Pinmuxing esterno rev.C QUAD
@@ -414,7 +421,6 @@ static unsigned int mx6q_set_in_outputmode_low[] = {
 	MX6Q_PAD_EIM_A19__GPIO_MODE,	
 	MX6Q_PAD_SD4_DAT7__GPIO_MODE,
 	MX6Q_PAD_CSIO_DAT18__GPIO_MODE,
-	MX6Q_PAD_NANDF_D4__GPIO_MODE,
 	MX6Q_PAD_EIM_WAIT__GPIO_MODE,	
 
 #ifdef PIN_38_PER_TEST_ACCENDI_SPEGNI
@@ -429,7 +435,7 @@ static unsigned int mx6q_set_in_outputmode_high[] = {
 	MX6Q_PAD_GPIO_2__GPIO_MODE,	// lvds PANEL_ON	
 	MX6Q_PAD_GPIO_4__GPIO_MODE,	// backlight lvds ****
 	MX6Q_PAD_EIM_EB2__GPIO_MODE,	// reset audio messo basso poi la pilota driver
-	MX6Q_PAD_GPIO_17__GPIO_MODE, // Segnale di reset per l'hub usb2514, (attivo basso) ****
+	//MX6Q_PAD_GPIO_17__GPIO_MODE, // Segnale di reset per l'hub usb2514, (attivo basso) ****
 	MX6Q_PAD_NANDF_D5__GPIO_MODE,
 	MX6Q_PAD_EIM_EB3__GPIO_MODE, // qualcos ethernet
 	MX6Q_PAD_NANDF_CS0__GPIO_MODE,
@@ -449,6 +455,11 @@ static unsigned int mx6q_set_in_inputmode[] = {
 #ifndef INTERNAL_SERIAL_ENABLED	
 	MX6Q_PAD_KEY_ROW0__GPIO_MODE,
 	MX6Q_PAD_KEY_COL0__GPIO_MODE,
+#endif
+
+#ifdef COLLAUDO_GPIO
+	MX6Q_PAD_GPIO_5__GPIO_MODE,		//i2c3_scl  messi come gpio per test collaudo
+	MX6Q_PAD_GPIO_6__GPIO_MODE, 	//i2c3_sda 
 #endif
 
 	//esterni rev c	

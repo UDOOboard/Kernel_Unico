@@ -90,13 +90,13 @@
 #define MX6_SECO_Q7_SATA_LED		IMX_GPIO_NR(6, 11)
 /******************* USB *******************/
 #define MX6_SECO_Q7_USB_OTG_PWR		IMX_GPIO_NR(3, 22)
-#define MX6_SECO_Q7_USB_HUB_RESET	IMX_GPIO_NR(7, 12)
+#define MX6_UDOO_USB_HUB_RESET	IMX_GPIO_NR(7, 12)
 /******************* LVDS *******************/
-#define MX6_SECO_Q7_LVDS_BLT_CTRL   IMX_GPIO_NR(1, 6)
+//#define MX6_SECO_Q7_LVDS_BLT_CTRL   IMX_GPIO_NR(1, 6)
 /******************* HDMI *******************/
 #define MX6_SECO_Q7_HDMI_CHECK		IMX_GPIO_NR(5, 2)
 /******************* ETHERNET *******************/
-#define MX6_SECO_Q7_FEC_RESET		IMX_GPIO_NR(3, 23)
+#define MX6_UDOO_FEC_RESET		IMX_GPIO_NR(3, 23)
 #define MX6_ENET_125MHz_EN			IMX_GPIO_NR(6, 24)
 /******************* EIM *******************/
 #define MX6_SECO_Q7_ECSPI1_CS1		IMX_GPIO_NR(3, 19)
@@ -115,8 +115,6 @@
 #define MX6_SECO_Q7_CAP_TCH_INT1	IMX_GPIO_NR(1, 9)
 #define MX6_SECO_Q7_CSI0_RST		IMX_GPIO_NR(4, 22)
 #define MX6_SECO_Q7_CSI0_PWN		IMX_GPIO_NR(4, 21)
-
-#define MX6_SECO_Q7_IO_MICRO        IMX_GPIO_NR(2, 4)
 
 #define MX6_SECO_Q7_SD3_CD 			IMX_GPIO_NR(7, 0)
 
@@ -432,9 +430,9 @@ static int mx6q_seco_q7_fec_phy_reset(struct phy_device *phydev) {
 		gpio_direction_output(MX6_ENET_125MHz_EN, 1);
 		gpio_set_value(MX6_ENET_125MHz_EN, 1);
 		printk("Resetting ethernet physical layer.\n");
-		gpio_set_value(MX6_SECO_Q7_FEC_RESET, 0);
+		gpio_set_value(MX6_UDOO_FEC_RESET, 0);
 		msleep(2);
-		gpio_set_value(MX6_SECO_Q7_FEC_RESET, 1);
+		gpio_set_value(MX6_UDOO_FEC_RESET, 1);
 		msleep(1);
 		gpio_free(MX6_ENET_125MHz_EN);
 		mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RX_CTL__ENET_RGMII_RX_CTL);
@@ -815,7 +813,7 @@ static struct spi_board_info imx6_seco_q7_spi_device[] __initdata = {
 #if defined(CONFIG_Q7_MTD_M25P80)
 	{
 		.modalias = "m25p80",
-		.max_speed_hz = 20000000, /* max spi clock (SCK) speed in HZ */
+		.max_speed_hz = 20000000, //max spi clock (SCK) speed in HZ 
 		.bus_num = 0,
 		.chip_select = 0,
 		.platform_data = &imx6_seco_q7_spi_flash_data,
@@ -832,6 +830,7 @@ static struct spi_board_info imx6_seco_q7_spi_device[] __initdata = {
 		.irq 					= gpio_to_irq(MX6_SECO_Q7_HDMI_CHECK),
     },
 #endif
+
 	{
 		.modalias				= "rtc-pcf2123",
 		.bus_num				= 0,
@@ -839,13 +838,14 @@ static struct spi_board_info imx6_seco_q7_spi_device[] __initdata = {
 //		.controller_data		= 
 		.mode					= SPI_MODE_0,
 	},
+
 };
+
 
 static void spi_device_init(void) {
 	spi_register_board_info(imx6_seco_q7_spi_device,
 				ARRAY_SIZE(imx6_seco_q7_spi_device));
 }
-
 
 
 /***********************************************************************
@@ -929,8 +929,6 @@ static const struct flexcan_platform_data
         mx6q_sabrelite_flexcan0_pdata __initconst = {
         .transceiver_switch = NULL,
 };
-
-
 
 /***********************************************************************
  *                                   MIPI                              *
@@ -1059,7 +1057,7 @@ static void __init fixup_mxc_board(struct machine_desc *desc, struct tag *tags,
  */
 static void __init mx6_seco_q7_board_init(void)
 {
-	int i, ret;
+	int i;
 	struct clk *clko2;
 	struct clk *new_parent;
 	int rate;
@@ -1076,29 +1074,20 @@ static void __init mx6_seco_q7_board_init(void)
 	
 
 #ifdef REVB
-		printk("\n> rev B");
+		printk("\n> rev B ");
 #else
-		printk("\n> rev C");
+		printk("\n> rev C ");
 #endif
-
-		
 
 	set_gpios_directions();
 
-	ret = gpio_request (MX6_SECO_Q7_IO_MICRO, "IO MICRO");
-	if (ret) {
-		printk("failed to get MX6_SECO_Q7_IO_MICRO: %d\n", ret);
-	} else {	
-		gpio_direction_input (MX6_SECO_Q7_IO_MICRO);
-	}
-
-	ret = gpio_request (MX6_SECO_Q7_LVDS_BLT_CTRL, "LVDS backlight");
+	/*ret = gpio_request (MX6_SECO_Q7_LVDS_BLT_CTRL, "LVDS backlight");
 	if (ret) {
 		printk("failed to get MX6_SECO_Q7_LVDS_BLT_CTRL: %d\n", ret);
 	} else {
 		gpio_direction_output(MX6_SECO_Q7_LVDS_BLT_CTRL, 1);
-	}
-	
+	}*/
+
 #ifdef CONFIG_FEC_1588
 	/* Set GPIO_16 input for IEEE-1588 ts_clk and RMII reference clock
 	 * For MX6 GPR1 bit21 meaning:
@@ -1108,15 +1097,15 @@ static void __init mx6_seco_q7_board_init(void)
 	mxc_iomux_set_gpr_register(1, 21, 1, 1);
 #endif
 
-/*
+
 #ifdef CONFIG_Q7_TOUCHSCREEN_TSC2006
 	tsc2006_dev_init ();
 #endif
-*/
+
 
 //   GPIO for Ethernet reset
-	gpio_request(MX6_SECO_Q7_FEC_RESET, "fec-reset");
-	gpio_direction_output(MX6_SECO_Q7_FEC_RESET, 1);
+	gpio_request(MX6_UDOO_FEC_RESET, "fec-reset");
+	gpio_direction_output(MX6_UDOO_FEC_RESET, 1);
 //   GPIO for Ethernet reset
  
 	gp_reg_id = seco_q7_dvfscore_data.reg_id;
@@ -1199,7 +1188,7 @@ static void __init mx6_seco_q7_board_init(void)
       //  imx6q_add_flexcan0(&mx6q_sabrelite_flexcan0_pdata);
 
 	/* release USB Hub reset */
-	gpio_set_value(MX6_SECO_Q7_USB_HUB_RESET, 1);
+	gpio_set_value(MX6_UDOO_USB_HUB_RESET, 1);
 
 	imx6q_add_mxc_pwm(0);
 	imx6q_add_mxc_pwm(1);
