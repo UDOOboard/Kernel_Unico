@@ -82,45 +82,29 @@
 #include "board-mx6sdl_seco_UDOO.h"
 
 /******************* SD *******************/
-#define MX6_SECO_Q7_SD1_CD			IMX_GPIO_NR(6, 15)
-#define MX6_SECO_Q7_SD1_WP			IMX_GPIO_NR(5, 20)
-#define MX6_SECO_Q7_SD4_CD			IMX_GPIO_NR(2, 6)
-#define MX6_SECO_Q7_SD4_WP			IMX_GPIO_NR(2, 7)
-/******************* SATA *******************/
-#define MX6_SECO_Q7_SATA_LED		IMX_GPIO_NR(6, 11)
+#define MX6_SECO_UDOO_SD3_CD		IMX_GPIO_NR(7, 0)
+
+#define MX6_SECO_UDOO_SD3_WP_PADCFG	(PAD_CTL_PKE | PAD_CTL_PUE |	\
+		PAD_CTL_PUS_22K_UP | PAD_CTL_SPEED_MED |	\
+		PAD_CTL_DSE_40ohm | PAD_CTL_HYS)
 /******************* USB *******************/
-#define MX6_SECO_Q7_USB_OTG_PWR		IMX_GPIO_NR(3, 22)
-#define MX6_UDOO_USB_HUB_RESET	IMX_GPIO_NR(7, 12)
+#define MX6_UDOO_USB_HUB_RESET			IMX_GPIO_NR(7, 12)
 /******************* LVDS *******************/
-//#define MX6_SECO_Q7_LVDS_BLT_CTRL   IMX_GPIO_NR(1, 6)
-/******************* HDMI *******************/
-#define MX6_SECO_Q7_HDMI_CHECK		IMX_GPIO_NR(5, 2)
+#define MX6_SECO_UDOO_LVDS_BLT_CTRL		IMX_GPIO_NR(1, 4) 
+#define MX6_SECO_UDOO_LVDS_PNL_CTRL		IMX_GPIO_NR(1, 2)
 /******************* ETHERNET *******************/
 #define MX6_UDOO_FEC_RESET		IMX_GPIO_NR(3, 23)
-#define MX6_ENET_125MHz_EN			IMX_GPIO_NR(6, 24)
-/******************* EIM *******************/
-#define MX6_SECO_Q7_ECSPI1_CS1		IMX_GPIO_NR(3, 19)
-#define MX6_SECO_Q7_ECSPI1_CS2		IMX_GPIO_NR(3, 24)
-#define MX6_SECO_Q7_ECSPI1_CS3		IMX_GPIO_NR(3, 25)
-#define MX6_SECO_Q7_RTC_CS4			IMX_GPIO_NR(2, 17)
+#define MX6_ENET_125MHz_EN		IMX_GPIO_NR(6, 24)
 /******************* AUDIO *******************/
-#ifdef CONFIG_Q7_SND_SOC_IMX_AC97_VT1613
-#define AC97_GPIO_TXFS				IMX_GPIO_NR(1, 11)
+#ifdef CONFIG_UDOO_SND_SOC_IMX_AC97_VT1613
+#define AC97_GPIO_RESET				IMX_GPIO_NR(2, 30)
 #define SSI_CH_NUMBER				1
 #endif
 /******************* CAN *******************/
-#define MX6_SECO_Q7_CAN1_STBY		IMX_GPIO_NR(1, 2)
-#define MX6_SECO_Q7_CAN1_EN			IMX_GPIO_NR(1, 4)
+//#define MX6_SECO_UDOO_CAN1_STBY		IMX_GPIO_NR(1, 2)
+//#define MX6_SECO_UDOO_CAN1_EN			IMX_GPIO_NR(1, 4)
 
-#define MX6_SECO_Q7_CAP_TCH_INT1	IMX_GPIO_NR(1, 9)
-#define MX6_SECO_Q7_CSI0_RST		IMX_GPIO_NR(4, 22)
-#define MX6_SECO_Q7_CSI0_PWN		IMX_GPIO_NR(4, 21)
-
-#define MX6_SECO_Q7_SD3_CD 			IMX_GPIO_NR(7, 0)
-
-#define MX6_SECO_Q7_SD3_WP_PADCFG	(PAD_CTL_PKE | PAD_CTL_PUE |	\
-		PAD_CTL_PUS_22K_UP | PAD_CTL_SPEED_MED |	\
-		PAD_CTL_DSE_40ohm | PAD_CTL_HYS)
+//#define MX6_SECO_UDOO_CAP_TCH_INT1	IMX_GPIO_NR(1, 9)
 
 
 void __init early_console_setup(unsigned long base, struct clk *clk);
@@ -139,121 +123,9 @@ extern void (*put_cpu_regulator)(void);
  *                                   SD                                *
  ***********************************************************************/
 
-/* for QUAD and DUAL */
-static iomux_v3_cfg_t MX6Q_USDHC_PAD_SETTING(3, 50);
-static iomux_v3_cfg_t MX6Q_USDHC_PAD_SETTING(3, 100);
-static iomux_v3_cfg_t MX6Q_USDHC_PAD_SETTING(3, 200);
-
-static iomux_v3_cfg_t MX6Q_USDHC_PAD_SETTING(4, 50);
-static iomux_v3_cfg_t MX6Q_USDHC_PAD_SETTING(4, 100);
-static iomux_v3_cfg_t MX6Q_USDHC_PAD_SETTING(4, 200);
-
-/* for SOLO and DUAL LITE */
-static iomux_v3_cfg_t MX6DL_USDHC_PAD_SETTING(3, 50);
-static iomux_v3_cfg_t MX6DL_USDHC_PAD_SETTING(3, 100);
-static iomux_v3_cfg_t MX6DL_USDHC_PAD_SETTING(3, 200);
-
-static iomux_v3_cfg_t MX6DL_USDHC_PAD_SETTING(4, 50);
-static iomux_v3_cfg_t MX6DL_USDHC_PAD_SETTING(4, 100);
-static iomux_v3_cfg_t MX6DL_USDHC_PAD_SETTING(4, 200);
-
-
-enum sd_pad_mode {
-	SD_PAD_MODE_LOW_SPEED,
-	SD_PAD_MODE_MED_SPEED,
-	SD_PAD_MODE_HIGH_SPEED,
-};
-
-
-static int plt_sd3_pad_change(int clock) {
-	static enum sd_pad_mode pad_mode = SD_PAD_MODE_LOW_SPEED;
-
-	if (clock > 100000000) {
-		if (pad_mode == SD_PAD_MODE_HIGH_SPEED)
-			return 0;
-
-		pad_mode = SD_PAD_MODE_HIGH_SPEED;
-		if (cpu_is_mx6q()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6q_sd3_200mhz,
-						ARRAY_SIZE(mx6dl_sd3_200mhz));
-		} else if (cpu_is_mx6dl()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6dl_sd3_200mhz,
-						ARRAY_SIZE(mx6dl_sd3_200mhz));
-		}
-	} else if (clock > 52000000) {
-		if (pad_mode == SD_PAD_MODE_MED_SPEED)
-			return 0;
-
-		pad_mode = SD_PAD_MODE_MED_SPEED;
-		if (cpu_is_mx6q()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6q_sd3_100mhz,
-						ARRAY_SIZE(mx6dl_sd3_200mhz));
-		} else if (cpu_is_mx6dl()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6dl_sd3_100mhz,
-						ARRAY_SIZE(mx6dl_sd3_200mhz));
-		}
-	} else {
-		if (pad_mode == SD_PAD_MODE_LOW_SPEED)
-			return 0;
-
-		pad_mode = SD_PAD_MODE_LOW_SPEED;
-		if (cpu_is_mx6q()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6q_sd3_50mhz,
-						ARRAY_SIZE(mx6dl_sd3_200mhz));
-		} else if (cpu_is_mx6dl()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6dl_sd3_50mhz,
-						ARRAY_SIZE(mx6dl_sd3_200mhz));
-		}
-	}
-}
-
-static int plt_sd4_pad_change(int clock) {
-	static enum sd_pad_mode pad_mode = SD_PAD_MODE_LOW_SPEED;
-
-	if (clock > 100000000) {
-		if (pad_mode == SD_PAD_MODE_HIGH_SPEED)
-			return 0;
-
-		pad_mode = SD_PAD_MODE_HIGH_SPEED;
-		if (cpu_is_mx6q()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6q_sd4_200mhz,
-						ARRAY_SIZE(mx6dl_sd4_200mhz));
-		} else if (cpu_is_mx6dl()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6dl_sd4_200mhz,
-						ARRAY_SIZE(mx6dl_sd4_200mhz));
-		}
-	} else if (clock > 52000000) {
-		if (pad_mode == SD_PAD_MODE_MED_SPEED)
-			return 0;
-
-		pad_mode = SD_PAD_MODE_MED_SPEED;
-		if (cpu_is_mx6q()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6q_sd4_100mhz,
-						ARRAY_SIZE(mx6dl_sd4_200mhz));
-		} else if (cpu_is_mx6dl()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6dl_sd4_100mhz,
-						ARRAY_SIZE(mx6dl_sd4_200mhz));
-		}
-	} else {
-		if (pad_mode == SD_PAD_MODE_LOW_SPEED)
-			return 0;
-
-		pad_mode = SD_PAD_MODE_LOW_SPEED;
-		if (cpu_is_mx6q()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6q_sd4_50mhz,
-						ARRAY_SIZE(mx6dl_sd4_200mhz));
-		} else if (cpu_is_mx6dl()) {
-			return mxc_iomux_v3_setup_multiple_pads(mx6dl_sd4_50mhz,
-						ARRAY_SIZE(mx6dl_sd4_200mhz));
-		}
-	}
-}
-
-
-
-	/* MMC 2 - SD_primary */
-static const struct esdhc_platform_data mx6q_seco_q7_sd3_data __initconst = {
-	.cd_gpio = MX6_SECO_Q7_SD3_CD,		
+	/* SD_primary */
+static const struct esdhc_platform_data mx6q_seco_UDOO_sd3_data __initconst = {
+	.cd_gpio = MX6_SECO_UDOO_SD3_CD,			
 	.always_present = 1,
 	.keep_power_at_suspend = 1,
 };
@@ -264,7 +136,7 @@ static const struct esdhc_platform_data mx6q_seco_q7_sd3_data __initconst = {
  ***********************************************************************/
 
 /* HW Initialization, if return 0, initialization is successful. */
-static int mx6q_seco_q7_sata_init(struct device *dev, void __iomem *addr) {
+static int mx6q_seco_UDOO_sata_init(struct device *dev, void __iomem *addr) {
 	u32 tmpdata;
 	int ret = 0;
 	struct clk *clk;
@@ -311,7 +183,7 @@ static int mx6q_seco_q7_sata_init(struct device *dev, void __iomem *addr) {
 	tmpdata = clk_get_rate(clk) / 1000;
 	clk_put(clk);
 
-#ifdef CONFIG_Q7_SATA_AHCI
+#ifdef CONFIG_UDOO_SATA_AHCI
 	ret = sata_init(addr, tmpdata);
 	if (ret == 0)
 		return ret;
@@ -332,15 +204,15 @@ put_sata_clk:
 	return ret;
 }
 
-#ifdef CONFIG_Q7_SATA_AHCI
-static void mx6q_seco_q7_sata_exit(struct device *dev) {
+#ifdef CONFIG_UDOO_SATA_AHCI
+static void mx6q_seco_UDOO_sata_exit(struct device *dev) {
 	clk_disable(sata_clk);
 	clk_put(sata_clk);
 }
 
-static struct ahci_platform_data mx6q_seco_q7_sata_data = {
-	.init = mx6q_seco_q7_sata_init,
-	.exit = mx6q_seco_q7_sata_exit,
+static struct ahci_platform_data mx6q_seco_UDOO_sata_data = {
+	.init = mx6q_seco_UDOO_sata_init,
+	.exit = mx6q_seco_UDOO_sata_exit,
 };
 
 #endif
@@ -351,46 +223,33 @@ static struct ahci_platform_data mx6q_seco_q7_sata_data = {
  *                                  UART                               *
  ***********************************************************************/
 
-static inline void mx6q_seco_q7_init_uart(void) {
+static inline void mx6q_seco_UDOO_init_uart(void) {
 	imx6q_add_imx_uart(0, NULL);
 	imx6q_add_imx_uart(1, NULL);
     imx6q_add_imx_uart(3, NULL);
 }
 
 
-
 /***********************************************************************
  *                                   USB                               *
  ***********************************************************************/
 
-static void imx6q_seco_q7_usbotg_vbus(bool on) {
-	if (on)
-		gpio_set_value(MX6_SECO_Q7_USB_OTG_PWR, 1);
-	else
-		gpio_set_value(MX6_SECO_Q7_USB_OTG_PWR, 0);
+static void imx6q_seco_UDOO_usbotg_vbus(bool on) {
+
 }
 
-static void __init imx6q_seco_q7_init_usb(void) {
-	int ret = 0;
+static void __init imx6q_seco_UDOO_init_usb(void) {
 
 	imx_otg_base = MX6_IO_ADDRESS(MX6Q_USB_OTG_BASE_ADDR);
 	/* disable external charger detect,
 	 * or it will affect signal quality at dp .
 	 */
-	ret = gpio_request(MX6_SECO_Q7_USB_OTG_PWR, "usb-pwr");
-	if (ret) {
-		pr_err("failed to get GPIO MX6_SECO_Q7_USB_OTG_PWR: %d\n",
-			ret);
-		return;
-	}
-	gpio_direction_output(MX6_SECO_Q7_USB_OTG_PWR, 0);
 	mxc_iomux_set_gpr_register(1, 13, 1, 1);
 
-	mx6_set_otghost_vbus_func(imx6q_seco_q7_usbotg_vbus);
+	mx6_set_otghost_vbus_func(imx6q_seco_UDOO_usbotg_vbus);
 //	mx6_usb_dr_init();
 //	mx6_usb_h1_init();
 }
-
 
 
 /***********************************************************************
@@ -422,7 +281,7 @@ static struct imx_ipuv3_platform_data ipu_data[] = {
  *                               ETHERNET                              *
  ***********************************************************************/
 
-static int mx6q_seco_q7_fec_phy_reset(struct phy_device *phydev) {
+static int mx6q_seco_UDOO_fec_phy_reset(struct phy_device *phydev) {
 	int ret;
 	mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RX_CTL__GPIO_6_24);
 	ret = gpio_request(MX6_ENET_125MHz_EN, "125mHz_en");
@@ -442,7 +301,7 @@ static int mx6q_seco_q7_fec_phy_reset(struct phy_device *phydev) {
 	return 0;
 }
 
-static int mx6q_seco_q7_fec_phy_init(struct phy_device *phydev) {
+static int mx6q_seco_UDOO_fec_phy_init(struct phy_device *phydev) {
 	int prod_ID;
 	/* prefer master mode, disable 1000 Base-T capable */
 	phy_write(phydev, 0x9, 0x1c00);
@@ -480,8 +339,8 @@ static int mx6q_seco_q7_fec_phy_init(struct phy_device *phydev) {
 }
 
 static struct fec_platform_data fec_data __initdata = {
-	.init = mx6q_seco_q7_fec_phy_init,
-	//.reset = mx6q_seco_q7_fec_phy_reset,
+	.init = mx6q_seco_UDOO_fec_phy_init,
+	//.reset = mx6q_seco_UDOO_fec_phy_reset,
 	.phy = PHY_INTERFACE_MODE_RGMII,
 };
 
@@ -528,7 +387,7 @@ static struct fsl_mxc_hdmi_core_platform_data hdmi_core_data = {
  *                                 VIDEO                               *
  ***********************************************************************/
 
-static struct ipuv3_fb_platform_data seco_q7_fb_data[] = {
+static struct ipuv3_fb_platform_data seco_UDOO_fb_data[] = {
 	{ /*fb0*/
 	.disp_dev = "ldb",
 	.interface_pix_fmt = IPU_PIX_FMT_RGB24,
@@ -565,7 +424,7 @@ static struct fsl_mxc_ldb_platform_data ldb_data = {
 	.sec_disp_id = 1,
 };
 
-static struct platform_pwm_backlight_data mx6_seco_q7_pwm_backlight_data = {
+static struct platform_pwm_backlight_data mx6_seco_UDOO_pwm_backlight_data = {
 	.pwm_id = 0,
 	.max_brightness = 255,
 	.dft_brightness = 128,
@@ -592,31 +451,31 @@ static struct fsl_mxc_capture_platform_data capture_data[] = {
  *                                  AUDIO                              *
  ***********************************************************************/
 
-#ifdef CONFIG_Q7_SND_SOC_IMX_AC97_VT1613
+#ifdef CONFIG_UDOO_SND_SOC_IMX_AC97_VT1613
 
-static struct mxc_audio_platform_data mx6_seco_q7_audio_data;
+static struct mxc_audio_platform_data mx6_seco_UDOO_audio_data;
 
 static void audio_codec_ac97_cold_reset(struct snd_ac97 *ac97) {
-    int ret = gpio_request(AC97_GPIO_TXFS, "ac97_reset");
+    int ret = gpio_request(AC97_GPIO_RESET, "ac97_reset");
 	if (ret) {
-		printk (KERN_ERR "request AC97_GPIO_TXFS failed!"); 
+		printk (KERN_ERR "request AC97_GPIO_RESET failed!"); 
 	} else {
-		gpio_direction_output(AC97_GPIO_TXFS, 0);
+		gpio_direction_output(AC97_GPIO_RESET, 0);
 	    udelay(2);
-	    gpio_set_value(AC97_GPIO_TXFS, 0);
+	    gpio_set_value(AC97_GPIO_RESET, 0);
 	    mdelay(1);
-	    gpio_set_value(AC97_GPIO_TXFS, 1);
+	    gpio_set_value(AC97_GPIO_RESET, 1);
 	    mdelay(100);
 	}
 	printk("audio_codec_ac97_cold_reset \n");
 }
 
-static struct imx_ssi_platform_data mx6_seco_q7_ssi_pdata = {
+static struct imx_ssi_platform_data mx6_seco_UDOO_ssi_pdata = {
     .ac97_reset             = audio_codec_ac97_cold_reset,
 	.flags = (IMX_SSI_USE_AC97 | IMX_SSI_DMA),
 };
 
-static struct mxc_audio_platform_data mx6_seco_q7_audio_data = {
+static struct mxc_audio_platform_data mx6_seco_UDOO_audio_data = {
 	.ssi_num = SSI_CH_NUMBER,
 	.src_port = SSI_CH_NUMBER,
 	.ext_port = 6, // OUTPUT ON AUD6 FOR AUDIO MUXING
@@ -637,20 +496,20 @@ struct vt1613_codec_data {
         struct vt1613_codec_vibra_data          *vibra;
 };
 
-static struct platform_device mx6_seco_q7_imx_audio_device = {
+static struct platform_device mx6_seco_UDOO_imx_audio_device = {
         .name           = "imx-vt1613",
 };
 
-static struct platform_device mx6_seco_q7_audio_device = {
+static struct platform_device mx6_seco_UDOO_audio_device = {
         .name           = "vt1613-ac97",
 };
 #endif
 
 static int imx6q_init_audio(void) {
-#ifdef CONFIG_Q7_SND_SOC_IMX_AC97_VT1613
-	mxc_register_device(&mx6_seco_q7_imx_audio_device, &mx6_seco_q7_audio_data);
-	mxc_register_device(&mx6_seco_q7_audio_device, NULL);
-	imx6q_add_imx_ssi(SSI_CH_NUMBER - 1, &mx6_seco_q7_ssi_pdata);
+#ifdef CONFIG_UDOO_SND_SOC_IMX_AC97_VT1613
+	mxc_register_device(&mx6_seco_UDOO_imx_audio_device, &mx6_seco_UDOO_audio_data);
+	mxc_register_device(&mx6_seco_UDOO_audio_device, NULL);
+	imx6q_add_imx_ssi(SSI_CH_NUMBER - 1, &mx6_seco_UDOO_ssi_pdata);
 #endif
 	return 0;
 }
@@ -662,11 +521,11 @@ static int imx6q_init_audio(void) {
  ***********************************************************************/
 
 static const struct anatop_thermal_platform_data
-	mx6q_seco_q7_anatop_thermal_data __initconst = {
+	mx6q_seco_UDOO_anatop_thermal_data __initconst = {
 		.name = "anatop_thermal",
 };
 
-static struct mxc_dvfs_platform_data seco_q7_dvfscore_data = {
+static struct mxc_dvfs_platform_data seco_UDOO_dvfscore_data = {
 	.reg_id = "cpu_vddgp",
 	.soc_id = "cpu_vddsoc",
 	.pu_id = "cpu_vddvpu",
@@ -691,199 +550,71 @@ static struct mxc_dvfs_platform_data seco_q7_dvfscore_data = {
 	.delay_time = 80,
 };
 
-static void seco_q7_suspend_enter(void) {
+static void seco_UDOO_suspend_enter(void) {
 	/* suspend preparation */
 }
 
-static void seco_q7_suspend_exit(void) {
+static void seco_UDOO_suspend_exit(void) {
 	/* resume restore */
 }
 
-static const struct pm_platform_data mx6q_seco_q7_pm_data __initconst = {
+static const struct pm_platform_data mx6q_seco_UDOO_pm_data __initconst = {
 	.name = "imx_pm",
-	.suspend_enter = seco_q7_suspend_enter,
-	.suspend_exit = seco_q7_suspend_exit,
+	.suspend_enter = seco_UDOO_suspend_enter,
+	.suspend_exit = seco_UDOO_suspend_exit,
 };
 
-static struct regulator_consumer_supply seco_q7_vmmc_consumers[] = {
+static struct regulator_consumer_supply seco_UDOO_vmmc_consumers[] = {
 	REGULATOR_SUPPLY("vmmc", "sdhci-esdhc-imx.1"),
 	REGULATOR_SUPPLY("vmmc", "sdhci-esdhc-imx.2"),
 	REGULATOR_SUPPLY("vmmc", "sdhci-esdhc-imx.3"),
 };
 
-static struct regulator_init_data seco_q7_vmmc_init = {
-	.num_consumer_supplies = ARRAY_SIZE(seco_q7_vmmc_consumers),
-	.consumer_supplies = seco_q7_vmmc_consumers,
+static struct regulator_init_data seco_UDOO_vmmc_init = {
+	.num_consumer_supplies = ARRAY_SIZE(seco_UDOO_vmmc_consumers),
+	.consumer_supplies = seco_UDOO_vmmc_consumers,
 };
 
-static struct fixed_voltage_config seco_q7_vmmc_reg_config = {
+static struct fixed_voltage_config seco_UDOO_vmmc_reg_config = {
 	.supply_name	= "vmmc",
 	.microvolts		= 3300000,
 	.gpio			= -1,
-	.init_data		= &seco_q7_vmmc_init,
+	.init_data		= &seco_UDOO_vmmc_init,
 };
 
-static struct platform_device seco_q7_vmmc_reg_devices = {
+static struct platform_device seco_UDOO_vmmc_reg_devices = {
 	.name	= "reg-fixed-voltage",
 	.id	= 3,
 	.dev	= {
-		.platform_data = &seco_q7_vmmc_reg_config,
+		.platform_data = &seco_UDOO_vmmc_reg_config,
 	},
 };
-
-
-
-/***********************************************************************
- *                                  PCIE                               *
- ***********************************************************************/
-
-#if defined(CONFIG_Q7_PCIE) 
-static const struct imx_pcie_platform_data mx6_seco_q7_pcie_data  __initconst = {
-	.pcie_pwr_en	= -EINVAL,
-	.pcie_rst	= -EINVAL,
-	.pcie_wake_up	= -EINVAL,
-	.pcie_dis	= -EINVAL,
-};
-#endif
-
-
-
-/***********************************************************************
- *                                 SPI-NOR                             *
- ***********************************************************************/
-
-#if defined(CONFIG_Q7_MTD_M25P80) 
-static struct mtd_partition imx6_seco_q7_spi_nor_partitions[] = {
-	{
-	 .name = "bootloader",
-	 .offset = 0,
-	 .size = 0x00040000,
-	},
-	{
-	 .name = "kernel",
-	 .offset = MTDPART_OFS_APPEND,
-	 .size = MTDPART_SIZ_FULL,
-	},
-};
-
-static struct flash_platform_data imx6_seco_q7_spi_flash_data = {
-	.name = "m25p80",
-	.parts = imx6_seco_q7_spi_nor_partitions,
-	.nr_parts = ARRAY_SIZE(imx6_seco_q7_spi_nor_partitions),
-	.type = "sst25vf016b",
-};
-#endif
-
-
-
-/***********************************************************************
- *                                   SPI                               *
- ***********************************************************************/
-
-static int mx6q_seco_q7_spi_cs[] = {
-	MX6_SECO_Q7_ECSPI1_CS1,
-	MX6_SECO_Q7_ECSPI1_CS2,
-	MX6_SECO_Q7_ECSPI1_CS3,
-	MX6_SECO_Q7_RTC_CS4,
-};
-
-static const struct spi_imx_master mx6q_seco_q7_spi_data __initconst = {
-	.chipselect     = mx6q_seco_q7_spi_cs,
-	.num_chipselect = ARRAY_SIZE(mx6q_seco_q7_spi_cs),
-};
-
-#ifdef CONFIG_Q7_TOUCHSCREEN_TSC2006
-static struct tsc2006_platform_data tsc2006_config __initdata = {
-};
-
-static void tsc2006_dev_init(void) {
-	return;
-
-	if (gpio_request(MX6_SECO_Q7_HDMI_CHECK, "TSC2006 pendown") < 0) {
-		printk("can't get tsc2006 pen down GPIO\n");
-	}
-
-        gpio_direction_input(MX6_SECO_Q7_HDMI_CHECK);
-	msleep(5);
-}
-
-#endif
-
-static struct spi_board_info imx6_seco_q7_spi_device[] __initdata = {
-#if defined(CONFIG_Q7_MTD_M25P80)
-	{
-		.modalias = "m25p80",
-		.max_speed_hz = 20000000, //max spi clock (SCK) speed in HZ 
-		.bus_num = 0,
-		.chip_select = 0,
-		.platform_data = &imx6_seco_q7_spi_flash_data,
-	},
-#endif
-#ifdef CONFIG_Q7_TOUCHSCREEN_TSC2006
-    {
-        .modalias               = "tsc2006",
-        .bus_num                = 0,
-        .chip_select            = 1,
-        .max_speed_hz           = 10*1000*1000,
-        .mode                   = SPI_MODE_0,
-        .platform_data          = &tsc2006_config,
-		.irq 					= gpio_to_irq(MX6_SECO_Q7_HDMI_CHECK),
-    },
-#endif
-
-	{
-		.modalias				= "rtc-pcf2123",
-		.bus_num				= 0,
-		.chip_select			= 4,	
-//		.controller_data		= 
-		.mode					= SPI_MODE_0,
-	},
-
-};
-
-
-static void spi_device_init(void) {
-	spi_register_board_info(imx6_seco_q7_spi_device,
-				ARRAY_SIZE(imx6_seco_q7_spi_device));
-}
 
 
 /***********************************************************************
  *                                   I2C                               *
  ***********************************************************************/
 
-static struct imxi2c_platform_data mx6q_seco_q7_i2c0_data = {
+static struct imxi2c_platform_data mx6q_seco_UDOO_i2c0_data = {
 	.bitrate = 100000,
 };
 
-static struct imxi2c_platform_data mx6q_seco_q7_i2c1_data = {
+static struct imxi2c_platform_data mx6q_seco_UDOO_i2c1_data = {
 	.bitrate = 400000,
 };
 
-static struct imxi2c_platform_data mx6q_seco_q7_i2c2_data = {
+static struct imxi2c_platform_data mx6q_seco_UDOO_i2c2_data = {
 	.bitrate = 400000,
 };
-
+/*
 static void pre_halt_signal (void) {
 }
 
 static void post_halt_signal (void) {
-}
-
-#ifdef CONFIG_Q7_MSP430
-static struct msp430_platform_data mx6_seco_q7_msp430 = {
-	.task_pre_halt_signal = pre_halt_signal,
-	.task_post_halt_signal = post_halt_signal,
-};
-#endif
+}*/
 
 static struct i2c_board_info mxc_i2c0_board_info[] __initdata = {
-#ifdef CONFIG_Q7_MSP430
-	{
-		I2C_BOARD_INFO("msp430", 0x40),
-       .platform_data 	= &mx6_seco_q7_msp430,
-    },
-#endif
+
 };
 
 static struct i2c_board_info mxc_i2c1_board_info[] __initdata = {
@@ -892,33 +623,8 @@ static struct i2c_board_info mxc_i2c1_board_info[] __initdata = {
 	},
 };
 
-#ifdef CONFIG_Q7_TOUCHSCREEN_TSC2004
-static int tsc2004_get_pendown_state (void) {
-        return gpio_get_value(MX6_SECO_Q7_HDMI_CHECK);
-}
-
-static int tsc2004_init_platform_hw (void) {
-	return 0;
-}
-
-static struct tsc2004_platform_data mx6_seco_q7_tsc2004 = {
-	.model		= 2004,
-	.x_plate_ohms 	= 180,
-	.get_pendown_state	= tsc2004_get_pendown_state,
-	.init_platform_hw = tsc2004_init_platform_hw,
-};
-#endif
-
 static struct i2c_board_info mxc_i2c2_board_info[] __initdata = {
-#ifdef CONFIG_Q7_TOUCHSCREEN_TSC2004
-	{
-		I2C_BOARD_INFO("tsc2004", 0x48),
-       .platform_data 	= &mx6_seco_q7_tsc2004,
-		.irq			= gpio_to_irq(MX6_SECO_Q7_HDMI_CHECK),
-    },
-#endif
 };
-
 
 
 /***********************************************************************
@@ -929,21 +635,6 @@ static const struct flexcan_platform_data
         mx6q_sabrelite_flexcan0_pdata __initconst = {
         .transceiver_switch = NULL,
 };
-
-/***********************************************************************
- *                                   MIPI                              *
- ***********************************************************************/
-/*
-static struct mipi_csi2_platform_data mipi_csi2_pdata = {
-	.ipu_id	 = 0,
-	.csi_id = 0,
-	.v_channel = 0,
-	.lanes = 2,
-	.dphy_clk = "mipi_pllref_clk",
-	.pixel_clk = "emi_clk",
-};
-*/
-
 
 
 /***********************************************************************
@@ -1055,9 +746,9 @@ static void __init fixup_mxc_board(struct machine_desc *desc, struct tag *tags,
 /*!
  * Board specific initialization.
  */
-static void __init mx6_seco_q7_board_init(void)
+static void __init mx6_seco_UDOO_board_init(void)
 {
-	int i;
+	int i, ret;
 	struct clk *clko2;
 	struct clk *new_parent;
 	int rate;
@@ -1081,12 +772,19 @@ static void __init mx6_seco_q7_board_init(void)
 
 	set_gpios_directions();
 
-	/*ret = gpio_request (MX6_SECO_Q7_LVDS_BLT_CTRL, "LVDS backlight");
+	ret = gpio_request (MX6_SECO_UDOO_LVDS_BLT_CTRL, "LVDS backlight");
 	if (ret) {
-		printk("failed to get MX6_SECO_Q7_LVDS_BLT_CTRL: %d\n", ret);
+		printk("failed to get MX6_SECO_UDOO_LVDS_BLT_CTRL: %d\n", ret);
 	} else {
-		gpio_direction_output(MX6_SECO_Q7_LVDS_BLT_CTRL, 1);
-	}*/
+		gpio_direction_output(MX6_SECO_UDOO_LVDS_BLT_CTRL, 1);
+	}
+
+	ret = gpio_request (MX6_SECO_UDOO_LVDS_PNL_CTRL, "LVDS backlight");
+	if (ret) {
+		printk("failed to get MX6_SECO_UDOO_LVDS_PNL_CTRL: %d\n", ret);
+	} else {
+		gpio_direction_output(MX6_SECO_UDOO_LVDS_PNL_CTRL, 1);
+	}
 
 #ifdef CONFIG_FEC_1588
 	/* Set GPIO_16 input for IEEE-1588 ts_clk and RMII reference clock
@@ -1097,21 +795,15 @@ static void __init mx6_seco_q7_board_init(void)
 	mxc_iomux_set_gpr_register(1, 21, 1, 1);
 #endif
 
-
-#ifdef CONFIG_Q7_TOUCHSCREEN_TSC2006
-	tsc2006_dev_init ();
-#endif
-
-
 //   GPIO for Ethernet reset
 	gpio_request(MX6_UDOO_FEC_RESET, "fec-reset");
 	gpio_direction_output(MX6_UDOO_FEC_RESET, 1);
 //   GPIO for Ethernet reset
  
-	gp_reg_id = seco_q7_dvfscore_data.reg_id;
-	soc_reg_id = seco_q7_dvfscore_data.soc_id;
-	pu_reg_id = seco_q7_dvfscore_data.pu_id;
-	mx6q_seco_q7_init_uart();
+	gp_reg_id = seco_UDOO_dvfscore_data.reg_id;
+	soc_reg_id = seco_UDOO_dvfscore_data.soc_id;
+	pu_reg_id = seco_UDOO_dvfscore_data.pu_id;
+	mx6q_seco_UDOO_init_uart();
 
 	/*
 	 * MX6DL/Solo only supports single IPU
@@ -1133,11 +825,11 @@ static void __init mx6_seco_q7_board_init(void)
 	imx6q_add_ipuv3(0, &ipu_data[0]);
 	if (cpu_is_mx6q()) {
 		imx6q_add_ipuv3(1, &ipu_data[1]);
-		for (i = 0; i < 4 && i < ARRAY_SIZE(seco_q7_fb_data); i++)
-			imx6q_add_ipuv3fb(i, &seco_q7_fb_data[i]);
+		for (i = 0; i < 4 && i < ARRAY_SIZE(seco_UDOO_fb_data); i++)
+			imx6q_add_ipuv3fb(i, &seco_UDOO_fb_data[i]);
 	} else
-		for (i = 0; i < 2 && i < ARRAY_SIZE(seco_q7_fb_data); i++)
-			imx6q_add_ipuv3fb(i, &seco_q7_fb_data[i]);
+		for (i = 0; i < 2 && i < ARRAY_SIZE(seco_UDOO_fb_data); i++)
+			imx6q_add_ipuv3fb(i, &seco_UDOO_fb_data[i]);
 
 	imx6q_add_vdoa();
 	imx6q_add_lcdif(&lcdif_data);
@@ -1148,9 +840,9 @@ static void __init mx6_seco_q7_board_init(void)
 	//imx6q_add_mipi_csi2(&mipi_csi2_pdata);
 	imx6q_add_imx_snvs_rtc();
 
-	imx6q_add_imx_i2c(0, &mx6q_seco_q7_i2c0_data);
-	imx6q_add_imx_i2c(1, &mx6q_seco_q7_i2c1_data);
-	imx6q_add_imx_i2c(2, &mx6q_seco_q7_i2c2_data);
+	imx6q_add_imx_i2c(0, &mx6q_seco_UDOO_i2c0_data);
+	imx6q_add_imx_i2c(1, &mx6q_seco_UDOO_i2c1_data);
+	imx6q_add_imx_i2c(2, &mx6q_seco_UDOO_i2c2_data);
 	i2c_register_board_info(0, mxc_i2c0_board_info,
 			ARRAY_SIZE(mxc_i2c0_board_info));
 	i2c_register_board_info(1, mxc_i2c1_board_info,
@@ -1158,30 +850,27 @@ static void __init mx6_seco_q7_board_init(void)
 	i2c_register_board_info(2, mxc_i2c2_board_info,
 			ARRAY_SIZE(mxc_i2c2_board_info));
 
-	/* SPI */
-	imx6q_add_ecspi(0, &mx6q_seco_q7_spi_data);
-	spi_device_init();;
 
 	imx6q_add_mxc_hdmi(&hdmi_data);
 
-	imx6q_add_anatop_thermal_imx(1, &mx6q_seco_q7_anatop_thermal_data);
-	mx6q_seco_q7_fec_phy_reset(NULL);
+	imx6q_add_anatop_thermal_imx(1, &mx6q_seco_UDOO_anatop_thermal_data);
+	mx6q_seco_UDOO_fec_phy_reset(NULL);
 	imx6_init_fec(fec_data);
-	imx6q_add_pm_imx(0, &mx6q_seco_q7_pm_data);
+	imx6q_add_pm_imx(0, &mx6q_seco_UDOO_pm_data);
 
-	imx6q_add_sdhci_usdhc_imx(2, &mx6q_seco_q7_sd3_data);
+	imx6q_add_sdhci_usdhc_imx(2, &mx6q_seco_UDOO_sd3_data);
 
 	imx_add_viv_gpu(&imx6_gpu_data, &imx6q_gpu_pdata);
-	imx6q_seco_q7_init_usb();
+	imx6q_seco_UDOO_init_usb();
 
-#ifdef CONFIG_Q7_SATA_AHCI
+#ifdef CONFIG_UDOO_SATA_AHCI
 	if (cpu_is_mx6q())
-		imx6q_add_ahci(0, &mx6q_seco_q7_sata_data);
+		imx6q_add_ahci(0, &mx6q_seco_UDOO_sata_data);
 #endif
 
 	imx6q_add_vpu();
 	imx6q_init_audio();
-	platform_device_register(&seco_q7_vmmc_reg_devices);
+	platform_device_register(&seco_UDOO_vmmc_reg_devices);
 	imx_asrc_data.asrc_core_clk = clk_get(NULL, "asrc_clk");
 	imx_asrc_data.asrc_audio_clk = clk_get(NULL, "asrc_serial_clk");
 	imx6q_add_asrc(&imx_asrc_data);
@@ -1193,21 +882,18 @@ static void __init mx6_seco_q7_board_init(void)
 	imx6q_add_mxc_pwm(0);
 	imx6q_add_mxc_pwm(1);
 
-	imx6q_add_mxc_pwm_backlight(0, &mx6_seco_q7_pwm_backlight_data);
+	imx6q_add_mxc_pwm_backlight(0, &mx6_seco_UDOO_pwm_backlight_data);
 
 	imx6q_add_otp();
 	imx6q_add_viim();
 	imx6q_add_imx2_wdt(0, NULL);
 	imx6q_add_dma();
 
-	imx6q_add_dvfs_core(&seco_q7_dvfscore_data);
+	imx6q_add_dvfs_core(&seco_UDOO_dvfscore_data);
 
 	imx6q_add_hdmi_soc();
 	imx6q_add_hdmi_soc_dai();
 
-#if defined(CONFIG_Q7_PCIE) 
-	imx6q_add_pcie(&mx6_seco_q7_pcie_data);
-#endif
 
 	clko2 = clk_get(NULL, "clko2_clk");
 	if (IS_ERR(clko2))
@@ -1230,7 +916,7 @@ static void __init mx6_seco_q7_board_init(void)
 }
 
 extern void __iomem *twd_base;
-static void __init mx6_seco_q7_timer_init(void) {
+static void __init mx6_seco_UDOO_timer_init(void) {
 	struct clk *uart_clk;
 #ifdef CONFIG_LOCAL_TIMERS
 	twd_base = ioremap(LOCAL_TWD_ADDR, SZ_256);
@@ -1242,11 +928,11 @@ static void __init mx6_seco_q7_timer_init(void) {
 	early_console_setup(UART2_BASE_ADDR, uart_clk);
 }
 
-static struct sys_timer mx6_seco_q7_timer = {
-	.init   = mx6_seco_q7_timer_init,
+static struct sys_timer mx6_seco_UDOO_timer = {
+	.init   = mx6_seco_UDOO_timer_init,
 };
 
-static void __init mx6q_seco_q7_reserve(void)
+static void __init mx6q_seco_UDOO_reserve(void)
 {
 	phys_addr_t phys;
 #if defined(CONFIG_MXC_GPU_VIV) || defined(CONFIG_MXC_GPU_VIV_MODULE)
@@ -1261,17 +947,16 @@ static void __init mx6q_seco_q7_reserve(void)
 }
 
 /*
- * initialize __mach_desc_MX6_seco_q7 data structure.
+ * initialize __mach_desc_MX6_seco_UDOO data structure.
  */
-//MACHINE_START(MX6_SECO_Q7, "SECO i.MX6 Quad/Dual/Dual Lite/Solo Q7 Board")
 MACHINE_START(MX6_SECO_UDOO, "SECO i.Mx6 UDOO Board")
 	/* Maintainer: Freescale Semiconductor, Inc. */
 	.boot_params = MX6_PHYS_OFFSET + 0x100,
 	.fixup = fixup_mxc_board,
 	.map_io = mx6_map_io,
 	.init_irq = mx6_init_irq,
-	.init_machine = mx6_seco_q7_board_init,
-	.timer = &mx6_seco_q7_timer,
-	.reserve = mx6q_seco_q7_reserve,
+	.init_machine = mx6_seco_UDOO_board_init,
+	.timer = &mx6_seco_UDOO_timer,
+	.reserve = mx6q_seco_UDOO_reserve,
 MACHINE_END
 

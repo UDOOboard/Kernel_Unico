@@ -467,15 +467,11 @@ static unsigned int mx6dl_set_in_outputmode_low[] = {
 static unsigned int mx6dl_set_in_outputmode_high[] = {
 	// connessioni interne
 	MX6DL_PAD_GPIO_0__GPIO_MODE,
-	MX6DL_PAD_GPIO_2__GPIO_MODE,	// lvds PANEL_ON	
-	MX6DL_PAD_GPIO_4__GPIO_MODE,	// backlight lvds ****
 	MX6DL_PAD_GPIO_16__GPIO_MODE,   // alimentazione bus otg del sam3x 1 per adk
-	//MX6DL_PAD_GPIO_17__GPIO_MODE, 	// Segnale di reset per l'hub usb2514, (attivo basso) ****
 	MX6DL_PAD_NANDF_D5__GPIO_MODE,	// abilita alimentazione dell sdcard	
 #ifndef REVB
 	MX6DL_PAD_NANDF_CS0__GPIO_MODE,
 	MX6DL_PAD_EIM_WAIT__GPIO_MODE,	// abilita la porta del otg
-	MX6DL_PAD_EIM_EB2__GPIO_MODE,	// reset audio messo basso poi la pilota driver
 	MX6DL_PAD_EIM_EB3__GPIO_MODE, 	// Alimentazione ethernet: deve essere messo alto, altrimenti kernel panic!
 #else
 	MX6DL_PAD_SD2_CMD__GPIO_MODE,   // reset audio rev b
@@ -489,8 +485,8 @@ static unsigned int mx6dl_set_in_inputmode[] = {
 	
 	MX6DL_PAD_SD2_DAT2__GPIO_MODE,
 	MX6DL_PAD_SD3_DAT5__GPIO_MODE,
-	MX6DL_PAD_DISP0_DAT0__GPIO_MODE,	// erase di arduino, il driver di pagano la mette in out e poi di nuovo in input
-	MX6DL_PAD_DISP0_DAT5__GPIO_MODE,  // abilita in teoria la seriale su imx6 o sam3x ma usiamo solo jumper 			
+	MX6DL_PAD_DISP0_DAT0__GPIO_MODE,	// erase di arduino, pilotato da driver
+	MX6DL_PAD_DISP0_DAT5__GPIO_MODE,  // abilita la seriale su imx6 o sam3x - messo in input usiamo solo jumper 			
 	MX6DL_PAD_CSIO_PIXCLK__GPIO_MODE,	
 	MX6DL_PAD_CSIO_DAT17__GPIO_MODE,	
 #ifdef REVB

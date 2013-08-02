@@ -432,12 +432,8 @@ static unsigned int mx6q_set_in_outputmode_low[] = {
 static unsigned int mx6q_set_in_outputmode_high[] = {
 	// connessioni interne
 	MX6Q_PAD_GPIO_0__GPIO_MODE,
-	MX6Q_PAD_GPIO_2__GPIO_MODE,	// lvds PANEL_ON	
-	MX6Q_PAD_GPIO_4__GPIO_MODE,	// backlight lvds ****
-	MX6Q_PAD_EIM_EB2__GPIO_MODE,	// reset audio messo basso poi la pilota driver
-	//MX6Q_PAD_GPIO_17__GPIO_MODE, // Segnale di reset per l'hub usb2514, (attivo basso) ****
 	MX6Q_PAD_NANDF_D5__GPIO_MODE,
-	MX6Q_PAD_EIM_EB3__GPIO_MODE, // qualcos ethernet
+	MX6Q_PAD_EIM_EB3__GPIO_MODE, // Alimentazione ethernet
 	MX6Q_PAD_NANDF_CS0__GPIO_MODE,
 };
 

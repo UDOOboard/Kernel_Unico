@@ -560,8 +560,19 @@ endmenu
 menu "UDOO Option"
         depends on MACH_MX6_SECO_UDOO
 
-config Q7_SATA_AHCI
-        bool "Q7 SATA support"
+
+config UDOO_DUAL_REVB
+        bool "UDOO Dual RevB"
+	select DUAL_REVB
+        help
+            This option enables compilation for UDOO Dual RevB
+
+            If unsure, say N.
+
+
+
+config UDOO_SATA_AHCI
+        bool "UDOO SATA support"
 	select SATA_AHCI
 	select SATA_AHCI_PLATFORM
         help
@@ -571,78 +582,14 @@ config Q7_SATA_AHCI
             If unsure, say Y.
 
 
-config Q7_ATH9KL
-        bool "Q7 wifi card Atheros ATH9KL"
-        depends on Q7_PCIE
-	select PCI
-	select WLAN
-	select ATH9K
-	select MAC80211
-	select ATH9K_PCI
-	select ATH_COMMON
-	select NETDEVICES
-
-        help
-            say Y here if you have a Seco Q7 board and want to use Atheros ATH9K WiFi chip.
-
-            If unsure, say Y.
-
-config Q7_MTD_M25P80
-        bool "Q7 M25P80 spi flash device"
-        depends on SPI_MASTER && GENERIC_HARDIRQS
-	select MTD_M25P80
-        help
-            say Y here if you have a Seco Q7 board and want to access flash SPI device.
-
-            If unsure, say N.
-
-config Q7_SND_SOC_IMX_AC97_VT1613
-        bool "Q7 'AC97 AUDIO CODEC VT1613"
+config UDOO_SND_SOC_IMX_AC97_VT1613
+        bool "UDOO 'AC97 AUDIO CODEC VT1613"
         depends on SND_IMX_SOC && SOUND && SND_SOC
 	select SND_SOC_IMX_AC97_VT1613
         help
-            say Y here if you have a Seco Q7 board and want to use audio codec 'AC97.
+            say Y here if you have a UDOO board and want to use audio codec 'AC97.
 
             If unsure, say Y.
-
-config Q7_TOUCHSCREEN_TSC2006
-        bool "TSC2006 based touchscreen"
-        depends on SPI_MASTER && GENERIC_HARDIRQS
-	select TOUCHSCREEN_TSC2006
-        help
-            say Y here if you have a TSC2006 based Touchscreen.
-
-            If unsure, say N.
-
-config Q7_TOUCHSCREEN_TSC2004
-        bool "TSC2004 based touchscreen"
-        depends on I2C
-	select TOUCHSCREEN_TSC2004
-        help
-            say Y here if you have a TSC2004 based Touchscreen.
-
-            If unsure, say N.
-
-config Q7_MSP430
-        bool "Seco Comunication System with MSP430"
-        depends on I2C
-        select MSP430
-        help
-            Say Y here if you want to use the Seco Halt System with MSP430.
-
-            If usure, say Y.
-            
-config Q7_PMIC_PFUZE100
-        bool "Freescale PMIC PFuze100"
-        depends on I2C
-	select REGULATOR
-	select MFD_PFUZE
-	select REGULATOR_PFUZE100
-	
-        help
-            say Y here if you have a PFUZE100 on board
-
-            If unsure, say N.
 
 
 menu "External i.MX6 Pinmuxing options"
@@ -650,25 +597,11 @@ menu "External i.MX6 Pinmuxing options"
 comment "Testing..."
 
 if MACH_MX6_SECO_UDOO
-config Q7_EMMC_INTERFACE
-	bool "Support for on board eMMC memory"
-	help
-		Support for on board eMMC memory
 
-config Q7_SD1_INTERFACE
-	bool "Support for onboard uSD card"
+config SPDIF_SUPPORT
+	bool "[NOT WORKING YET] Support for SPDIF - external pinout"
 	help
-		Support for onboard uSD card
-
-config Q7_SD2_INTERFACE
-	bool "Support for external SD card on carrier board"
-	help
-		Support for external SD card on carrier board
-
-config Q7_SD3_INTERFACE
-	bool "Support for SDIO to CPLD Bus"
-	help
-		Support for SDIO to CPLD Bus
+		[NOT WORKING YET] Support for SPDIF - external pinout
 
 endif
 
@@ -678,11 +611,6 @@ endmenu
 endmenu
 
 #####################
-
-
-
-
-
 
 
 config IMX_PCIE
