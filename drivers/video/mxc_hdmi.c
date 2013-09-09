@@ -67,6 +67,7 @@
 #define HDMI_EDID_SUCCESS	0
 #define HDMI_EDID_FAIL		-1
 #define HDMI_EDID_NO_MODES	-2
+#define HDMI_EDID_SAME 		-3
 
 #define NUM_CEA_VIDEO_MODES	64
 #define DEFAULT_VIDEO_MODE	16 /* 1080P */
@@ -1435,7 +1436,12 @@ static int mxc_hdmi_read_edid(struct mxc_hdmi *hdmi)
 
 	/* Save edid cfg for audio driver */
 	hdmi_set_edid_cfg(&hdmi->edid_cfg);
-
+	
+	if (!memcmp(edid_old, hdmi->edid, HDMI_EDID_LEN)) {
+		dev_info(&hdmi->pdev->dev, "same edid\n");
+		return HDMI_EDID_SAME;
+	}
+	
 	if (hdmi->fbi->monspecs.modedb_len == 0) {
 		dev_info(&hdmi->pdev->dev, "No modes read from edid\n");
 		return HDMI_EDID_NO_MODES;
@@ -1720,7 +1726,8 @@ static void mxc_hdmi_cable_connected(struct mxc_hdmi *hdmi)
 	case HDMI_EDID_SUCCESS:
 		mxc_hdmi_edid_rebuild_modelist(hdmi);
 		break;
-
+	case HDMI_EDID_SAME:
+		break;
 	case HDMI_EDID_FAIL:
 		mxc_hdmi_default_edid_cfg(hdmi);
 		/* No break here  */
