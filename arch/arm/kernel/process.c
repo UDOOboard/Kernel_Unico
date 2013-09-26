@@ -237,23 +237,33 @@ void machine_shutdown(void)
 #endif
 }
 
-#include <linux/i2c/msp430.h>
-#if defined(CONFIG_MACH_MX6_SECO_Q7) 
-	#define HALT_GPIO IMX_GPIO_NR(2, 13)
-#elif defined(CONFIG_MACH_MX6_SECO_uQ7)
-	#define HALT_GPIO IMX_GPIO_NR(2, 13)
-#elif defined(CONFIG_MACH_MX6_SECO_UDOO)
-	#define HALT_GPIO IMX_GPIO_NR(2, 13)
-#endif
 #include <linux/gpio.h>
+#if defined(CONFIG_MACH_MX6_SECO_UDOO)
+	#define HALT_GPIO		IMX_GPIO_NR(2, 4)
+	#define MX6_SECO_ARD_RESET	IMX_GPIO_NR(1, 0) 
+#endif
+
 void machine_halt(void)
 {
-#if defined(CONFIG_MACH_MX6_SECO_Q7) || defined(CONFIG_MACH_MX6_SECO_uQ7) || defined(CONFIG_MACH_MX6_SECO_UDOO)
-	int	ret = gpio_request (HALT_GPIO, "HALT");
+	int ret;
+#if defined(CONFIG_MACH_MX6_SECO_UDOO)
+
+	ret = gpio_request(MX6_SECO_ARD_RESET, "HALT");
 	if (ret) {
-		printk("failed to get HALT: %d\n", ret);
-	} else {	
-		gpio_direction_output (HALT_GPIO, 0);
+		printk(KERN_ERR "failed to request GPIO FOR ARDUINO RESET\n");
+	} else {
+		gpio_direction_output(MX6_SECO_ARD_RESET, 0);
+		printk(KERN_EMERG "Sam Reset\n");
+	}
+
+	msleep(5);
+
+	ret = gpio_request (HALT_GPIO, "HALT");
+	if (ret) {
+		printk(KERN_EMERG "failed to get HALT: %d\n", ret);
+	} else {			
+		gpio_direction_output (HALT_GPIO, 1);
+		printk(KERN_EMERG "Halt\n");
 	}
 #endif
 	machine_shutdown();
