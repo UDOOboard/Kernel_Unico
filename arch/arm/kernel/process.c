@@ -248,14 +248,8 @@ void machine_halt(void)
 	int ret;
 #if defined(CONFIG_MACH_MX6_SECO_UDOO)
 
-	ret = gpio_request(MX6_SECO_ARD_RESET, "HALT");
-	if (ret) {
-		printk(KERN_ERR "failed to request GPIO FOR ARDUINO RESET\n");
-	} else {
-		gpio_direction_output(MX6_SECO_ARD_RESET, 0);
-		printk(KERN_EMERG "Sam Reset\n");
-	}
-
+	gpio_direction_output(MX6_SECO_ARD_RESET, 0);
+	printk(KERN_EMERG "Sam3x in reset\n");
 	msleep(5);
 
 	ret = gpio_request (HALT_GPIO, "HALT");
