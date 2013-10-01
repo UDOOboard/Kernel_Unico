@@ -95,6 +95,10 @@
 /******************* ETHERNET *******************/
 #define MX6_UDOO_FEC_RESET		IMX_GPIO_NR(3, 23)
 #define MX6_ENET_125MHz_EN		IMX_GPIO_NR(6, 24)
+#define MX6_ENET_RD3			IMX_GPIO_NR(6, 29)
+#define MX6_ENET_RD2			IMX_GPIO_NR(6, 28)
+#define MX6_ENET_RD1			IMX_GPIO_NR(6, 27)
+#define MX6_ENET_RD0			IMX_GPIO_NR(6, 25)
 /******************* AUDIO *******************/
 #ifdef CONFIG_UDOO_SND_SOC_IMX_AC97_VT1613
 #define AC97_GPIO_RESET				IMX_GPIO_NR(2, 30)
@@ -284,9 +288,21 @@ static struct imx_ipuv3_platform_data ipu_data[] = {
 static int mx6q_seco_UDOO_fec_phy_reset(struct phy_device *phydev) {
 	int ret;
 	mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RX_CTL__GPIO_6_24);
+	mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RD3__GPIO_6_29);
+	mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RD2__GPIO_6_28);
+	mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RD1__GPIO_6_27);
+	mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RD0__GPIO_6_25);
 	ret = gpio_request(MX6_ENET_125MHz_EN, "125mHz_en");
+	ret = gpio_request(MX6_ENET_RD3, "en-RD3");
+	ret = gpio_request(MX6_ENET_RD2, "en-RD2");
+	ret = gpio_request(MX6_ENET_RD1, "en-RD1");
+	ret = gpio_request(MX6_ENET_RD0, "en-RD0");	
 	if (!ret) {
 		gpio_direction_output(MX6_ENET_125MHz_EN, 1);
+		gpio_direction_output(MX6_ENET_RD3, 1);
+		gpio_direction_output(MX6_ENET_RD2, 1);
+		gpio_direction_output(MX6_ENET_RD1, 1);
+		gpio_direction_output(MX6_ENET_RD0, 1);
 		gpio_set_value(MX6_ENET_125MHz_EN, 1);
 		printk("Resetting ethernet physical layer.\n");
 		gpio_set_value(MX6_UDOO_FEC_RESET, 0);
@@ -294,21 +310,34 @@ static int mx6q_seco_UDOO_fec_phy_reset(struct phy_device *phydev) {
 		gpio_set_value(MX6_UDOO_FEC_RESET, 1);
 		msleep(1);
 		gpio_free(MX6_ENET_125MHz_EN);
+		gpio_free(MX6_ENET_RD3);
+		gpio_free(MX6_ENET_RD2);
+		gpio_free(MX6_ENET_RD1);
+		gpio_free(MX6_ENET_RD0);
 		mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RX_CTL__ENET_RGMII_RX_CTL);
+		mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RD3__ENET_RGMII_RD3);
+		mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RD2__ENET_RGMII_RD2);
+		mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RD1__ENET_RGMII_RD1);
+		mxc_iomux_v3_setup_pad(MX6Q_PAD_RGMII_RD0__ENET_RGMII_RD0);
 	} else {
 		printk(KERN_ERR "Reset of ethernet physical layer failed.\n");
 	}
 	return 0;
 }
 
+	
 static int mx6q_seco_UDOO_fec_phy_init(struct phy_device *phydev) {
 	int prod_ID;
+	int temp;
+			int temp1;
+			int reg_data;
 	/* prefer master mode, disable 1000 Base-T capable */
-	phy_write(phydev, 0x9, 0x1c00);
+	//phy_write(phydev, 0x9, 0x1c00);
 	prod_ID = phy_read(phydev, 0x3);
 
 #define KSZ9021_id 0x1611
 #define KSZ9031_id 0x1621
+#define KSZ9031_id2 0x1622
 
         switch (prod_ID) {
                 case KSZ9021_id:
@@ -329,6 +358,13 @@ static int mx6q_seco_UDOO_fec_phy_init(struct phy_device *phydev) {
 			phy_write(phydev, 0x0e, 0x0008); // reg. idx address
 			phy_write(phydev, 0x0d, 0x4002); // data operation - no autoinc.
 			phy_write(phydev, 0x0e, 0x03FF);
+			
+		 case KSZ9031_id2:
+            printk("Activating ethernet physical layer Micrel KSZ9031 Gigabit PHY.\n");
+                        phy_write(phydev, 0x0d, 0x0002); // reg. select operation
+                        phy_write(phydev, 0x0e, 0x0008); // reg. idx address
+                        phy_write(phydev, 0x0d, 0x4002); // data operation - no autoinc.
+                        phy_write(phydev, 0x0e, 0x03FF);
 			break;
                 default:
                         printk("Warning: Product ID of physical layer not recognized [id = 0x%04x unknown]\n", prod_ID);
