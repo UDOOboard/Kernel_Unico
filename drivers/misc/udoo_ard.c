@@ -28,7 +28,8 @@
 
 #define AUTH_TOKEN 0x5A5A
 // #define MAX_MSEC_SINCE_LAST_IRQ 1000*1000*1000
-#define MAX_MSEC_SINCE_LAST_IRQ 400 //
+#define MAX_MSEC_SINCE_LAST_IRQ 400 // 
+#define GRAY_TIME_BETWEEN_RESET 10000 // In this time we can't accept new erase/reset code 
 
 static struct workqueue_struct *erase_reset_wq;
 
@@ -36,6 +37,7 @@ typedef struct {
     struct work_struct erase_reset_work;
     int    step;
     int    cmdcode;
+    int    erase_reset_lock;
     unsigned long    last_int_time_in_ns;
     unsigned long    last_int_time_in_sec;
 } erase_reset_work_t;
@@ -63,7 +65,7 @@ static iomux_v3_cfg_t mx6dl_disable_uart4_pads[] = {
 };
 
 
-static void erase_reset_wq_function( struct work_struct *work)
+static void erase_reset_wq_function( struct work_struct *work2)
 {
     int ret;
 
@@ -106,7 +108,9 @@ static void erase_reset_wq_function( struct work_struct *work)
     msleep(80);
     gpio_set_value(MX6QSDL_SECO_ARD_RESET, 1);
     //  kfree( (void *)work );
-    printk("UDOO ERASE and RESET on Sam3x EXECUTED. \n");
+    printk("UDOO ERASE and RESET on Sam3x EXECUTED. [%d]\n", work->erase_reset_lock);
+    msleep(GRAY_TIME_BETWEEN_RESET);
+    work->erase_reset_lock = 0;
 
 //    msleep(30000);
 
@@ -162,11 +166,17 @@ static irqreturn_t udoo_bossac_req(int irq, void *dev_id)
         erase_reset_work->step = erase_reset_work->step + 1;
     }
 
+//printk("erase_reset_work->erase_reset_lock = %d \n", erase_reset_work->erase_reset_lock);
     if ( erase_reset_work->step == 21 ) {  // Passed authentication and code acquiring step.
 
 //printk("RECEIVED CODE = 0x%04x \n", erase_reset_work->cmdcode);
         if (erase_reset_work->cmdcode == 0xF) {
-            retval = queue_work( erase_reset_wq, (struct work_struct *)work );
+	    if (erase_reset_work->erase_reset_lock == 0) {
+            	erase_reset_work->erase_reset_lock = 1;
+            	retval = queue_work( erase_reset_wq, (struct work_struct *)work );
+	    } else {
+		printk("Erase and reset operation already in progress. Do nothing.\n");
+	    } 
             // To do: check retval error code.
         } else {
 //            msleep(30000);
@@ -249,6 +259,7 @@ static int udoo_ard_init(void)
                 work->cmdcode = 0;
                 work->last_int_time_in_ns = 0;
                 work->last_int_time_in_sec = 0;
+                work->erase_reset_lock = 0;
             //  retval = queue_work( erase_reset_wq, (struct work_struct *)work );
         }
     }
