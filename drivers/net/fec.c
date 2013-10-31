@@ -289,7 +289,7 @@ void *fec_enet_get_pre_txbd(struct net_device *ndev)
 	struct bufdesc *bdp = fep->cur_tx;
 
 	if (bdp == fep->tx_bd_base)
-		return bdp + TX_RING_SIZE;
+		return bdp + TX_RING_SIZE - 1;
 	else
 		return bdp - 1;
 
