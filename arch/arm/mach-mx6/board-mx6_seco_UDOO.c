@@ -55,6 +55,10 @@
 #include <linux/spi/tsc2006.h>
 #include <linux/i2c/msp430.h>
 
+#if defined(CONFIG_TOUCHSCREEN_SITRONIX_I2C_TOUCH) || defined(CONFIG_TOUCHSCREEN_SITRONIX_I2C_TOUCH_MODULE)
+#include <linux/input/sitronix_i2c_touch.h>
+#endif
+
 #include <mach/common.h>
 #include <mach/hardware.h>
 #include <mach/mxc_dvfs.h>
@@ -92,6 +96,9 @@
 /******************* LVDS *******************/
 #define MX6_SECO_UDOO_LVDS_BLT_CTRL		IMX_GPIO_NR(1, 4) 
 #define MX6_SECO_UDOO_LVDS_PNL_CTRL		IMX_GPIO_NR(1, 2)
+/******************* TOUCH *******************/
+#define MX6_UDOO_TOUCH_RST		IMX_GPIO_NR(1, 15)
+#define MX6_UDOO_TOUCH_INT              IMX_GPIO_NR(1, 13)      
 /******************* ETHERNET *******************/
 #define MX6_UDOO_FEC_RESET		IMX_GPIO_NR(3, 23)
 #define MX6_ENET_125MHz_EN		IMX_GPIO_NR(6, 24)
@@ -177,7 +184,7 @@ static int mx6q_seco_UDOO_sata_init(struct device *dev, void __iomem *addr) {
 
 	/* enable SATA_PHY PLL */
 	tmpdata = readl(IOMUXC_GPR13);
-	writel(((tmpdata & ~0x2) | 0x2), IOMUXC_GPR13);
+	writel((tmpdata | 0x2), IOMUXC_GPR13);
 
 	/* Get the AHB clock rate, and configure the TIMER1MS reg later */
 	clk = clk_get(NULL, "ahb");
@@ -699,6 +706,31 @@ static void pre_halt_signal (void) {
 static void post_halt_signal (void) {
 }*/
 
+#if defined(CONFIG_TOUCHSCREEN_SITRONIX_I2C_TOUCH) || defined(CONFIG_TOUCHSCREEN_SITRONIX_I2C_TOUCH_MODULE)
+
+static void sitronix_reset_ic(void) {
+	printk("%s\n", __FUNCTION__);
+	gpio_direction_output(MX6_UDOO_TOUCH_RST, 1);
+	gpio_set_value(MX6_UDOO_TOUCH_RST, 0);
+	mdelay(1);
+	gpio_set_value(MX6_UDOO_TOUCH_RST, 1);
+	//gpio_free(MULTITOUCH_RESET_GPIO);
+}
+
+static int sitronix_get_int_status(void)
+{
+//	printk("%s\n", __FUNCTION__);
+	return gpio_get_value(MX6_UDOO_TOUCH_INT);
+}
+
+struct sitronix_i2c_touch_platform_data 	touch_i2c_conf ={
+	.get_int_status = sitronix_get_int_status,
+	.reset_ic = sitronix_reset_ic,
+};
+
+#endif // CONFIG_TOUCHSCREEN_SITRONIX_I2C_TOUCH
+
+
 static struct i2c_board_info mxc_i2c0_board_info[] __initdata = {
 
 };
@@ -710,6 +742,14 @@ static struct i2c_board_info mxc_i2c1_board_info[] __initdata = {
 };
 
 static struct i2c_board_info mxc_i2c2_board_info[] __initdata = {
+#if defined(CONFIG_TOUCHSCREEN_SITRONIX_I2C_TOUCH) || defined(CONFIG_TOUCHSCREEN_SITRONIX_I2C_TOUCH_MODULE)
+	{
+		I2C_BOARD_INFO(SITRONIX_I2C_TOUCH_DRV_NAME, 0x55),
+		.irq		= gpio_to_irq(MX6_UDOO_TOUCH_INT),
+		.platform_data 	= &touch_i2c_conf,
+	},
+#endif
+
 #if defined(CONFIG_MXC_CAMERA_OV5640_MIPI) || defined(CONFIG_MXC_CAMERA_OV5640_MIPI_MODULE)
 	{
 		I2C_BOARD_INFO("ov5640_mipi", 0x3c),

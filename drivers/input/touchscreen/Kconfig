@@ -11,6 +11,19 @@ menuconfig INPUT_TOUCHSCREEN
 
 if INPUT_TOUCHSCREEN
 
+config TOUCHSCREEN_SITRONIX_I2C_TOUCH
+	tristate "Sitronix I2C I/F Multi-Touch Controller"
+	depends on I2C
+	---help---
+	Say Y here if you have a Sitronix multitouch panel.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called sitronix_i2c_touch.
+	  To invert x or y axexs add following options to kernel
+	  boot parameters: "sitronix_invert_x", "sitronix_invert_y". 
+
 config TOUCHSCREEN_88PM860X
 	tristate "Marvell 88PM860x touchscreen"
 	depends on MFD_88PM860X
