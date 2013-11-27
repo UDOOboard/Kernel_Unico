@@ -317,6 +317,45 @@ static void __init imx6q_seco_UDOO_init_usb(void) {
  *                               GPU - IPU                             *
  ***********************************************************************/
 
+static unsigned long gpu_reserved_mem = SZ_128M;
+static int __init early_gpu_res_mem(char *arg)
+{
+	int gpu_reserved_memory_selector = 128;
+        gpu_reserved_memory_selector = simple_strtoul(arg, NULL, 0);
+
+        switch (gpu_reserved_memory_selector) {
+                case 1:
+			gpu_reserved_mem = SZ_1M;
+			break;
+                case 8:
+			gpu_reserved_mem = SZ_8M;
+			break;
+                case 16:
+			gpu_reserved_mem = SZ_16M;
+			break;
+                case 32:
+			gpu_reserved_mem = SZ_32M;
+			break;
+                case 64:
+			gpu_reserved_mem = SZ_64M;
+			break;
+                case 128:
+			gpu_reserved_mem = SZ_128M;
+			break;
+                case 256:
+			gpu_reserved_mem = SZ_256M;
+			break;
+                default:
+        		printk("Warn: Unrecognized GPU reserved memory size. Valid value are: 1, 8, 16, 32, 64, 128, 256.\n");
+                        gpu_reserved_mem = SZ_128M;
+                        break;
+
+        }
+        printk("GPU reserved memory size = %d\n", gpu_reserved_mem);
+        return 0;
+}
+early_param("gpu_memory", early_gpu_res_mem);
+
 static struct viv_gpu_platform_data imx6q_gpu_pdata __initdata = {
 	.reserved_mem_size = SZ_128M,
 };
@@ -1081,6 +1120,7 @@ static void __init mx6q_seco_UDOO_reserve(void)
 {
 	phys_addr_t phys;
 #if defined(CONFIG_MXC_GPU_VIV) || defined(CONFIG_MXC_GPU_VIV_MODULE)
+	imx6q_gpu_pdata.reserved_mem_size = gpu_reserved_mem;
 	if (imx6q_gpu_pdata.reserved_mem_size) {
 		phys = memblock_alloc_base(imx6q_gpu_pdata.reserved_mem_size,
 					   SZ_4K, SZ_1G);
