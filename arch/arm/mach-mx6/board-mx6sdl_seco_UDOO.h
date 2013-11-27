@@ -209,10 +209,15 @@ static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
 	MX6DL_PAD_EIM_A22__GPIO_2_16,				//	for CPLD logic
 	MX6DL_PAD_EIM_A23__GPIO_6_6,				//  for CPLD logic
 	MX6DL_PAD_EIM_A24__GPIO_5_4,				//  for CPLD logic
+	MX6DL_PAD_EIM_WAIT__GPIO_5_0,				//  for CPLD logic
                  
+    /************ I2C BUS ************/
 		/* I2C1 */
 	MX6DL_PAD_EIM_D21__I2C1_SCL,				//	I2C1_SCL - SMB
 	MX6DL_PAD_EIM_D28__I2C1_SDA,				//	I2C1_SDA - SMB
+
+	MX6DL_PAD_GPIO_5__I2C3_SCL,                  //      I2C3_SCL
+    MX6DL_PAD_GPIO_6__I2C3_SDA,
 
 	/* 
 	*	internal pinmuxing

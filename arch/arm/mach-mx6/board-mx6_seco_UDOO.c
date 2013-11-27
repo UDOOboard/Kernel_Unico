@@ -99,6 +99,8 @@
 #define MX6_ENET_RD2			IMX_GPIO_NR(6, 28)
 #define MX6_ENET_RD1			IMX_GPIO_NR(6, 27)
 #define MX6_ENET_RD0			IMX_GPIO_NR(6, 25)
+/******************* CAM *******************/
+#define MX6_CAMERA_RST		IMX_GPIO_NR(6, 5)
 /******************* AUDIO *******************/
 #ifdef CONFIG_UDOO_SND_SOC_IMX_AC97_VT1613
 #define AC97_GPIO_RESET				IMX_GPIO_NR(2, 30)
@@ -232,6 +234,54 @@ static inline void mx6q_seco_UDOO_init_uart(void) {
 	imx6q_add_imx_uart(1, NULL);
     imx6q_add_imx_uart(3, NULL);
 }
+
+/***********************************************************************
+ *                    MIPI - CSI 5Mpx OV5640 CAMERA on CN11                        *
+ ***********************************************************************/
+
+#if defined(CONFIG_MXC_CAMERA_OV5640_MIPI) || defined(CONFIG_MXC_CAMERA_OV5640_MIPI_MODULE)
+
+static void ov5640_mipi_camera_io_init(void)
+{
+	struct clk *clko1;
+	
+	if (cpu_is_mx6q())
+		mxc_iomux_v3_setup_pad(MX6Q_PAD_CSI0_MCLK__CCM_CLKO);
+	else
+		mxc_iomux_v3_setup_pad(MX6DL_PAD_CSI0_MCLK__CCM_CLKO);
+	
+	clko1 = clk_get(NULL, "clko_clk");
+	if (IS_ERR(clko1)) {
+		pr_err("can't get CLKO1 clock.\n");
+	} else {
+		long round = clk_round_rate(clko1, 27000000);
+		clk_set_rate(clko1, round);
+		clk_enable(clko1);
+	}
+	
+	/* Camera reset */
+	gpio_request(MX6_CAMERA_RST, "cam-reset");
+	gpio_direction_output(MX6_CAMERA_RST, 0);
+	msleep(1);
+	gpio_set_value(MX6_CAMERA_RST, 1);
+	msleep(100);
+	
+/* for mx6dl, mipi virtual channel 1 connect to csi 1*/
+	if (cpu_is_mx6dl())
+		mxc_iomux_set_gpr_register(13, 3, 3, 1);
+}
+
+static void ov5640_mipi_camera_powerdown(int powerdown)
+{
+}
+
+static struct fsl_mxc_camera_platform_data ov5640_mipi_data = {
+	.mclk = 22000000,
+	.csi = 0,
+	.io_init = ov5640_mipi_camera_io_init,
+	.pwdn = ov5640_mipi_camera_powerdown,
+};
+#endif //  if defined(CONFIG_MXC_CAMERA_OV5640_MIPI) || defined(CONFIG_MXC_CAMERA_OV5640_MIPI_MODULE)
 
 
 /***********************************************************************
@@ -660,6 +710,12 @@ static struct i2c_board_info mxc_i2c1_board_info[] __initdata = {
 };
 
 static struct i2c_board_info mxc_i2c2_board_info[] __initdata = {
+#if defined(CONFIG_MXC_CAMERA_OV5640_MIPI) || defined(CONFIG_MXC_CAMERA_OV5640_MIPI_MODULE)
+	{
+		I2C_BOARD_INFO("ov5640_mipi", 0x3c),
+       		.platform_data = (void *)&ov5640_mipi_data,
+        },
+#endif
 };
 
 
@@ -670,6 +726,19 @@ static struct i2c_board_info mxc_i2c2_board_info[] __initdata = {
 static const struct flexcan_platform_data
         mx6q_sabrelite_flexcan0_pdata __initconst = {
         .transceiver_switch = NULL,
+};
+
+/***********************************************************************
+ *                                   MIPI                              *
+ ***********************************************************************/
+
+static struct mipi_csi2_platform_data mipi_csi2_pdata = {
+	.ipu_id	 = 0,
+	.csi_id = 0,
+	.v_channel = 0,
+	.lanes = 2,
+	.dphy_clk = "mipi_pllref_clk",
+	.pixel_clk = "emi_clk",
 };
 
 
@@ -873,7 +942,7 @@ static void __init mx6_seco_UDOO_board_init(void)
 	imx6q_add_v4l2_output(0);
 	imx6q_add_v4l2_capture(0, &capture_data[0]);
 	imx6q_add_v4l2_capture(1, &capture_data[1]);
-	//imx6q_add_mipi_csi2(&mipi_csi2_pdata);
+	imx6q_add_mipi_csi2(&mipi_csi2_pdata);
 	imx6q_add_imx_snvs_rtc();
 
 	imx6q_add_imx_i2c(0, &mx6q_seco_UDOO_i2c0_data);
