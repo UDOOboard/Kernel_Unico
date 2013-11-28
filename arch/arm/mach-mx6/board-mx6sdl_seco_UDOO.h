@@ -216,8 +216,11 @@ static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
 	MX6DL_PAD_EIM_D21__I2C1_SCL,				//	I2C1_SCL - SMB
 	MX6DL_PAD_EIM_D28__I2C1_SDA,				//	I2C1_SDA - SMB
 
-	MX6DL_PAD_GPIO_5__I2C3_SCL,                  //      I2C3_SCL
-    MX6DL_PAD_GPIO_6__I2C3_SDA,
+	MX6DL_PAD_KEY_COL3__I2C2_SCL,				//	I2C2_SCL
+	MX6DL_PAD_KEY_ROW3__I2C2_SDA,				//	I2C2_SDA
+
+	MX6DL_PAD_GPIO_5__I2C3_SCL,                 //  I2C3_SCL
+    MX6DL_PAD_GPIO_6__I2C3_SDA,					// 	I2C3_SDA
 
 	/* 
 	*	internal pinmuxing
