@@ -121,10 +121,10 @@ static struct fb_videomode ldb_modedb[] = {
 	 FB_VMODE_NONINTERLACED,
 	 FB_MODE_IS_DETAILED,},
 	{
-	 "LDB-WXGA", 59, 1368, 768, 13890, // Rif. 1366x768 Panel CHIMEI M156B3-LA1
-	 93, 33,
-	 22, 7,
-	 40, 4,
+	 "LDB-WXGA", 60, 1368, 768, 12960, // Rif. 1366x768 Panel G156XW01V0
+	 9, 3,
+	 2, 7,
+	 200, 38,
 	 0,
 	 FB_VMODE_NONINTERLACED,
 	 FB_MODE_IS_DETAILED,},
