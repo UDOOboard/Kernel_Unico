@@ -148,8 +148,6 @@ static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
 	MX6DL_PAD_SD3_DAT2__USDHC3_DAT2_50MHZ,		//	eMMC_DAT2
 	MX6DL_PAD_SD3_DAT3__USDHC3_DAT3_50MHZ,		//	eMMC_DAT3
 	MX6DL_PAD_SD3_RST__USDHC3_RST,				//	eMMC_RESETN
-
-	MX6DL_PAD_GPIO_6__GPIO_1_6,			//    - gpio generic
         
         /* ECSPI1 */
 	MX6DL_PAD_EIM_D16__ECSPI1_SCLK,      		//	to SPI
@@ -212,7 +210,6 @@ static iomux_v3_cfg_t mx6sdl_seco_UDOO_pads[] = {
 	MX6DL_PAD_EIM_WAIT__GPIO_5_0,				//  for CPLD logic
                  
     /************ I2C BUS ************/
-		/* I2C1 */
 	MX6DL_PAD_EIM_D21__I2C1_SCL,				//	I2C1_SCL - SMB
 	MX6DL_PAD_EIM_D28__I2C1_SDA,				//	I2C1_SDA - SMB
 

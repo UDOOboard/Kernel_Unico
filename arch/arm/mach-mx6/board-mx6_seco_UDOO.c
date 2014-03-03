@@ -253,9 +253,15 @@ static void ov5640_mipi_camera_io_init(void)
 	struct clk *clko1;
 	
 	if (cpu_is_mx6q())
+	{
 		mxc_iomux_v3_setup_pad(MX6Q_PAD_CSI0_MCLK__CCM_CLKO);
+		mxc_iomux_v3_setup_pad(MX6Q_PAD_CSI0_DAT18__GPIO_6_4);
+	}
 	else
+	{
 		mxc_iomux_v3_setup_pad(MX6DL_PAD_CSI0_MCLK__CCM_CLKO);
+		mxc_iomux_v3_setup_pad(MX6DL_PAD_CSI0_DAT18__GPIO_6_4);
+	}
 	
 	clko1 = clk_get(NULL, "clko_clk");
 	if (IS_ERR(clko1)) {
@@ -273,9 +279,9 @@ static void ov5640_mipi_camera_io_init(void)
 	gpio_set_value(MX6_CAMERA_RST, 1);
 	msleep(100);
 	
-/* for mx6dl, mipi virtual channel 1 connect to csi 1*/
+/* for mx6dl, mipi virtual channel 1 connect to csi 0*/
 	if (cpu_is_mx6dl())
-		mxc_iomux_set_gpr_register(13, 3, 3, 1);
+		mxc_iomux_set_gpr_register(13, 0, 3, 0);
 }
 
 static void ov5640_mipi_camera_powerdown(int powerdown)
@@ -311,7 +317,6 @@ static void __init imx6q_seco_UDOO_init_usb(void) {
 //	mx6_usb_dr_init();
 //	mx6_usb_h1_init();
 }
-
 
 /***********************************************************************
  *                               GPU - IPU                             *
@@ -424,9 +429,6 @@ static int mx6q_seco_UDOO_fec_phy_reset(struct phy_device *phydev) {
 	
 static int mx6q_seco_UDOO_fec_phy_init(struct phy_device *phydev) {
 	int prod_ID;
-	int temp;
-			int temp1;
-			int reg_data;
 	/* prefer master mode, disable 1000 Base-T capable */
 	//phy_write(phydev, 0x9, 0x1c00);
 	prod_ID = phy_read(phydev, 0x3);
