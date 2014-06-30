@@ -2,6 +2,13 @@
 # Video configuration
 #
 
+config V4L2LOOPBACK
+    tristate "V4l2Loopback module"
+    depends on ARM
+    default m if ARM
+    ---help---
+      V4l2Loopback Module.
+
 menu "Graphics support"
 	depends on HAS_IOMEM
 
@@ -31,7 +38,7 @@ config VIDEO_OUTPUT_CONTROL
 	tristate "Lowlevel video output switch controls"
 	help
 	  This framework adds support for low-level control of the video 
-	  output switch.
+	  output switch.c
 
 menuconfig FB
 	tristate "Support for frame buffer devices"
