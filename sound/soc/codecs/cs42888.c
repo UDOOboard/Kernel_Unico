@@ -15,14 +15,13 @@
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
 #include <linux/i2c.h>
 #include <linux/spi/spi.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
-#include <linux/fsl_devices.h>
-#include <mach/hardware.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -34,7 +33,6 @@
 #include <asm/div64.h>
 #include "cs42888.h"
 
-#include "../imx/imx-pcm.h"
 #define CS42888_NUM_SUPPLIES 4
 static const char *cs42888_supply_names[CS42888_NUM_SUPPLIES] = {
 	"VA",
@@ -46,122 +44,14 @@ static const char *cs42888_supply_names[CS42888_NUM_SUPPLIES] = {
 #define CS42888_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE |\
 			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
 
-/* CS42888 registers addresses */
-#define CS42888_CHIPID		0x01	/* Chip ID */
-#define CS42888_PWRCTL		0x02	/* Power Control */
-#define CS42888_MODE		0x03	/* Functional Mode */
-#define CS42888_FORMAT		0x04	/* Interface Formats */
-#define CS42888_ADCCTL		0x05	/* ADC Control */
-#define CS42888_TRANS		0x06	/* Transition Control */
-#define CS42888_MUTE		0x07	/* Mute Control */
-#define CS42888_VOLAOUT1	0x08	/* Volume Control AOUT1*/
-#define CS42888_VOLAOUT2	0x09	/* Volume Control AOUT2*/
-#define CS42888_VOLAOUT3	0x0A	/* Volume Control AOUT3*/
-#define CS42888_VOLAOUT4	0x0B	/* Volume Control AOUT4*/
-#define CS42888_VOLAOUT5	0x0C	/* Volume Control AOUT5*/
-#define CS42888_VOLAOUT6	0x0D	/* Volume Control AOUT6*/
-#define CS42888_VOLAOUT7	0x0E	/* Volume Control AOUT7*/
-#define CS42888_VOLAOUT8	0x0F	/* Volume Control AOUT8*/
-#define CS42888_DACINV		0x10	/* DAC Channel Invert */
-#define CS42888_VOLAIN1		0x11	/* Volume Control AIN1 */
-#define CS42888_VOLAIN2		0x12	/* Volume Control AIN2 */
-#define CS42888_VOLAIN3		0x13	/* Volume Control AIN3 */
-#define CS42888_VOLAIN4		0x14	/* Volume Control AIN4 */
-#define CS42888_ADCINV		0x17	/* ADC Channel Invert */
-#define CS42888_STATUSCTL	0x18	/* Status Control */
-#define CS42888_STATUS		0x19	/* Status */
-#define CS42888_STATUSMASK	0x1A	/* Status Mask */
-
-#define CS42888_FIRSTREG	0x01
-#define CS42888_LASTREG		0x1A
-#define CS42888_NUMREGS	(CS42888_LASTREG - CS42888_FIRSTREG + 1)
-#define CS42888_I2C_INCR	0x80
-
-/* Bit masks for the CS42888 registers */
-#define CS42888_CHIPID_ID_MASK	0xF0
-#define CS42888_CHIPID_REV	0x0F
-#define CS42888_PWRCTL_PDN_ADC2_OFFSET		6
-#define CS42888_PWRCTL_PDN_ADC1_OFFSET		5
-#define CS42888_PWRCTL_PDN_DAC4_OFFSET		4
-#define CS42888_PWRCTL_PDN_DAC3_OFFSET		3
-#define CS42888_PWRCTL_PDN_DAC2_OFFSET		2
-#define CS42888_PWRCTL_PDN_DAC1_OFFSET		1
-#define CS42888_PWRCTL_PDN_OFFSET		0
-#define CS42888_PWRCTL_PDN_ADC2_MASK	(1 << CS42888_PWRCTL_PDN_ADC2_OFFSET)
-#define CS42888_PWRCTL_PDN_ADC1_MASK	(1 << CS42888_PWRCTL_PDN_ADC1_OFFSET)
-#define CS42888_PWRCTL_PDN_DAC4_MASK	(1 << CS42888_PWRCTL_PDN_DAC4_OFFSET)
-#define CS42888_PWRCTL_PDN_DAC3_MASK	(1 << CS42888_PWRCTL_PDN_DAC3_OFFSET)
-#define CS42888_PWRCTL_PDN_DAC2_MASK	(1 << CS42888_PWRCTL_PDN_DAC2_OFFSET)
-#define CS42888_PWRCTL_PDN_DAC1_MASK	(1 << CS42888_PWRCTL_PDN_DAC1_OFFSET)
-#define CS42888_PWRCTL_PDN_MASK		(1 << CS42888_PWRCTL_PDN_OFFSET)
-
-#define CS42888_MODE_SPEED_MASK	0xF0
-#define CS42888_MODE_1X		0x00
-#define CS42888_MODE_2X		0x50
-#define CS42888_MODE_4X		0xA0
-#define CS42888_MODE_SLAVE	0xF0
-#define CS42888_MODE_DIV_MASK	0x0E
-#define CS42888_MODE_DIV1	0x00
-#define CS42888_MODE_DIV2	0x02
-#define CS42888_MODE_DIV3	0x04
-#define CS42888_MODE_DIV4	0x06
-#define CS42888_MODE_DIV5	0x08
-
-#define CS42888_FORMAT_FREEZE_OFFSET	7
-#define CS42888_FORMAT_AUX_DIF_OFFSET	6
-#define CS42888_FORMAT_DAC_DIF_OFFSET	3
-#define CS42888_FORMAT_ADC_DIF_OFFSET	0
-#define CS42888_FORMAT_FREEZE_MASK	(1 << CS42888_FORMAT_FREEZE_OFFSET)
-#define CS42888_FORMAT_AUX_DIF_MASK	(1 << CS42888_FORMAT_AUX_DIF_OFFSET)
-#define CS42888_FORMAT_DAC_DIF_MASK	(7 << CS42888_FORMAT_DAC_DIF_OFFSET)
-#define CS42888_FORMAT_ADC_DIF_MASK	(7 << CS42888_FORMAT_ADC_DIF_OFFSET)
-
-#define CS42888_TRANS_DAC_SNGVOL_OFFSET	    7
-#define CS42888_TRANS_DAC_SZC_OFFSET	    5
-#define CS42888_TRANS_AMUTE_OFFSET	    4
-#define CS42888_TRANS_MUTE_ADC_SP_OFFSET    3
-#define CS42888_TRANS_ADC_SNGVOL_OFFSET	    2
-#define CS42888_TRANS_ADC_SZC_OFFSET	    0
-#define CS42888_TRANS_DAC_SNGVOL_MASK	(1 << CS42888_TRANS_DAC_SNGVOL_OFFSET)
-#define CS42888_TRANS_DAC_SZC_MASK	(3 << CS42888_TRANS_DAC_SZC_OFFSET)
-#define CS42888_TRANS_AMUTE_MASK	(1 << CS42888_TRANS_AMUTE_OFFSET)
-#define CS42888_TRANS_MUTE_ADC_SP_MASK	(1 << CS42888_TRANS_MUTE_ADC_SP_OFFSET)
-#define CS42888_TRANS_ADC_SNGVOL_MASK	(1 << CS42888_TRANS_ADC_SNGVOL_OFFSET)
-#define CS42888_TRANS_ADC_SZC_MASK	(3 << CS42888_TRANS_ADC_SZC_OFFSET)
-
-#define CS42888_TRANS_DAC_SZC_IC     (0 << CS42888_TRANS_DAC_SZC_OFFSET)
-#define CS42888_TRANS_DAC_SZC_ZC     (1 << CS42888_TRANS_DAC_SZC_OFFSET)
-#define CS42888_TRANS_DAC_SZC_SR     (2 << CS42888_TRANS_DAC_SZC_OFFSET)
-#define CS42888_TRANS_DAC_SZC_SRZC   (3 << CS42888_TRANS_DAC_SZC_OFFSET)
-
-#define CS42888_MUTE_AOUT8	(0x1 << 7)
-#define CS42888_MUTE_AOUT7	(0x1 << 6)
-#define CS42888_MUTE_AOUT6	(0x1 << 5)
-#define CS42888_MUTE_AOUT5	(0x1 << 4)
-#define CS42888_MUTE_AOUT4	(0x1 << 3)
-#define CS42888_MUTE_AOUT3	(0x1 << 2)
-#define CS42888_MUTE_AOUT2	(0x1 << 1)
-#define CS42888_MUTE_AOUT1	(0x1 << 0)
-#define CS42888_MUTE_ALL	(CS42888_MUTE_AOUT1 | CS42888_MUTE_AOUT2 | \
-				CS42888_MUTE_AOUT3 | CS42888_MUTE_AOUT4 | \
-				CS42888_MUTE_AOUT5 | CS42888_MUTE_AOUT6 | \
-				CS42888_MUTE_AOUT7 | CS42888_MUTE_AOUT8)
-
-#define DIF_LEFT_J		0
-#define DIF_I2S			1
-#define DIF_RIGHT_J		2
-#define DIF_TDM			6
-
 /* Private data for the CS42888 */
 struct cs42888_private {
+	struct clk *clk;
 	struct snd_soc_codec *codec;
 	u8 reg_cache[CS42888_NUMREGS + 1];
 	unsigned int mclk; /* Input frequency of the MCLK pin */
-	unsigned int mode; /* The mode (I2S or left-justified) */
 	unsigned int slave_mode;
-	unsigned int manual_mute;
 	struct regulator_bulk_data supplies[CS42888_NUM_SUPPLIES];
-	struct mxc_audio_codec_platform_data pdata;
 };
 
 /**
@@ -181,7 +71,7 @@ struct cs42888_private {
 static int cs42888_fill_cache(struct snd_soc_codec *codec)
 {
 	u8 *cache = codec->reg_cache;
-	struct i2c_client *i2c_client = codec->control_data;
+	struct i2c_client *i2c_client = to_i2c_client(codec->dev);
 	s32 length;
 
 	length = i2c_smbus_read_i2c_block_data(i2c_client,
@@ -193,33 +83,31 @@ static int cs42888_fill_cache(struct snd_soc_codec *codec)
 		       i2c_client->addr);
 		return -EIO;
 	}
-
 	return 0;
 }
 
-
-#ifdef CS42888_DEBUG
+#ifdef DEBUG
 static void dump_reg(struct snd_soc_codec *codec)
 {
 	int i, reg;
 	int ret;
 	u8 *cache = codec->reg_cache + 1;
 
-	printk(KERN_DEBUG "dump begin\n");
-	printk(KERN_DEBUG "reg value in cache\n");
+	dev_dbg(codec->dev, "dump begin\n");
+	dev_dbg(codec->dev, "reg value in cache\n");
 	for (i = 0; i < CS42888_NUMREGS; i++)
-		printk(KERN_DEBUG "reg[%d] = 0x%x\n", i, cache[i]);
+		dev_dbg(codec->dev, "reg[%d] = 0x%x\n", i, cache[i]);
 
-	printk(KERN_DEBUG "real reg value\n");
+	dev_dbg(codec->dev, "real reg value\n");
 	ret = cs42888_fill_cache(codec);
 	if (ret < 0) {
-		pr_err("failed to fill register cache\n");
+		dev_err(codec->dev, "failed to fill register cache\n");
 		return ret;
 	}
 	for (i = 0; i < CS42888_NUMREGS; i++)
-		printk(KERN_DEBUG "reg[%d] = 0x%x\n", i, cache[i]);
+		dev_dbg(codec->dev, "reg[%d] = 0x%x\n", i, cache[i]);
 
-	printk(KERN_DEBUG "dump end\n");
+	dev_dbg(codec->dev, "dump end\n");
 }
 #else
 static void dump_reg(struct snd_soc_codec *codec)
@@ -235,59 +123,33 @@ static const DECLARE_TLV_DB_SCALE(adc_tlv, -6400, 50, 1);
 static int cs42888_out_vu(struct snd_kcontrol *kcontrol,
 			 struct snd_ctl_elem_value *ucontrol)
 {
-	struct soc_mixer_control *mc =
-		(struct soc_mixer_control *)kcontrol->private_value;
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-	unsigned int reg = mc->reg;
-	unsigned int reg2 = mc->rreg;
-	int ret;
-	u16 val;
-
-	ret = snd_soc_put_volsw_2r(kcontrol, ucontrol);
-	if (ret < 0)
-		return ret;
-
-	/* Now write again with the volume update bit set */
-	val = snd_soc_read(codec, reg);
-	ret = snd_soc_write(codec, reg, val);
-
-	val = snd_soc_read(codec, reg2);
-	ret = snd_soc_write(codec, reg2, val);
-	return 0;
+	return snd_soc_put_volsw_2r(kcontrol, ucontrol);
 }
 
-int cs42888_info_volsw_s8(struct snd_kcontrol *kcontrol,
+static int cs42888_info_volsw_s8(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_info *uinfo)
 {
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
-	int max = mc->max;
-	int min = mc->min;
 
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 2;
 	uinfo->value.integer.min = 0;
-	uinfo->value.integer.max = max-min;
+	uinfo->value.integer.max = mc->max - mc->min;
 	return 0;
 }
 
-int cs42888_get_volsw_s8(struct snd_kcontrol *kcontrol,
+static int cs42888_get_volsw_s8(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-	unsigned int reg = mc->reg;
-	unsigned int reg2 = mc->rreg;
-	int min = mc->min;
-	int val = snd_soc_read(codec, reg);
+	s8 val = snd_soc_read(codec, mc->reg);
+	ucontrol->value.integer.value[0] = val - mc->min;
 
-	ucontrol->value.integer.value[0] =
-		((signed char)(val))-min;
-
-	val = snd_soc_read(codec, reg2);
-	ucontrol->value.integer.value[1] =
-		((signed char)(val))-min;
+	val = snd_soc_read(codec, mc->rreg);
+	ucontrol->value.integer.value[1] = val - mc->min;
 	return 0;
 }
 
@@ -297,26 +159,22 @@ int cs42888_put_volsw_s8(struct snd_kcontrol *kcontrol,
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-	unsigned int reg = mc->reg;
-	unsigned int reg2 = mc->rreg;
-	int min = mc->min;
 	unsigned short val;
 	int ret;
 
-	val = (ucontrol->value.integer.value[0]+min);
-	ret = snd_soc_write(codec, reg, val);
+	val = ucontrol->value.integer.value[0] + mc->min;
+	ret = snd_soc_write(codec, mc->reg, val);
 	if (ret < 0) {
-		pr_err("i2c write failed\n");
+		dev_err(codec->dev, "i2c write failed\n");
 		return ret;
 	}
 
-	val = ((ucontrol->value.integer.value[1]+min));
-	ret = snd_soc_write(codec, reg2, val);
+	val = ucontrol->value.integer.value[1] + mc->min;
+	ret = snd_soc_write(codec, mc->rreg, val);
 	if (ret < 0) {
-		pr_err("i2c write failed\n");
+		dev_err(codec->dev, "i2c write failed\n");
 		return ret;
 	}
-
 	return 0;
 }
 
@@ -327,8 +185,8 @@ int cs42888_put_volsw_s8(struct snd_kcontrol *kcontrol,
 	.access = SNDRV_CTL_ELEM_ACCESS_TLV_READ |\
 		SNDRV_CTL_ELEM_ACCESS_READWRITE,  \
 	.tlv.p = (tlv_array), \
-	.info = snd_soc_info_volsw_2r, \
-	.get = snd_soc_get_volsw_2r, \
+	.info = snd_soc_info_volsw, \
+	.get = snd_soc_get_volsw, \
 	.put = cs42888_out_vu, \
 	.private_value = (unsigned long)&(struct soc_mixer_control) \
 		{.reg = reg_left, \
@@ -344,7 +202,8 @@ int cs42888_put_volsw_s8(struct snd_kcontrol *kcontrol,
 	.access = SNDRV_CTL_ELEM_ACCESS_TLV_READ | \
 		  SNDRV_CTL_ELEM_ACCESS_READWRITE, \
 	.tlv.p  = (tlv_array), \
-	.info   = cs42888_info_volsw_s8, .get = cs42888_get_volsw_s8, \
+	.info   = cs42888_info_volsw_s8, \
+	.get = cs42888_get_volsw_s8, \
 	.put    = cs42888_put_volsw_s8, \
 	.private_value = (unsigned long)&(struct soc_mixer_control) \
 		{.reg = reg_left, \
@@ -387,73 +246,61 @@ static const struct soc_enum cs42888_enum[] = {
 };
 
 static const struct snd_kcontrol_new cs42888_snd_controls[] = {
-SOC_CS42888_DOUBLE_R_TLV("DAC1 Playback Volume",
-			    CS42888_VOLAOUT1,
-			    CS42888_VOLAOUT2,
-			    0, 0xff, 1, dac_tlv),
-SOC_CS42888_DOUBLE_R_TLV("DAC2 Playback Volume",
-			    CS42888_VOLAOUT3,
-			    CS42888_VOLAOUT4,
-			    0, 0xff, 1, dac_tlv),
-SOC_CS42888_DOUBLE_R_TLV("DAC3 Playback Volume",
-			    CS42888_VOLAOUT5,
-			    CS42888_VOLAOUT6,
-			    0, 0xff, 1, dac_tlv),
-SOC_CS42888_DOUBLE_R_TLV("DAC4 Playback Volume",
-			    CS42888_VOLAOUT7,
-			    CS42888_VOLAOUT8,
-			    0, 0xff, 1, dac_tlv),
-SOC_CS42888_DOUBLE_R_S8_TLV("ADC1 Capture Volume",
-			    CS42888_VOLAIN1,
-			    CS42888_VOLAIN2,
-			    -128, 48, adc_tlv),
-SOC_CS42888_DOUBLE_R_S8_TLV("ADC2 Capture Volume",
-			    CS42888_VOLAIN3,
-			    CS42888_VOLAIN4,
-			    -128, 48, adc_tlv),
-SOC_ENUM("ADC High-Pass Filter Switch", cs42888_enum[0]),
-SOC_ENUM("DAC1 Invert Switch", cs42888_enum[1]),
-SOC_ENUM("DAC2 Invert Switch", cs42888_enum[2]),
-SOC_ENUM("DAC3 Invert Switch", cs42888_enum[3]),
-SOC_ENUM("DAC4 Invert Switch", cs42888_enum[4]),
-SOC_ENUM("ADC1 Invert Switch", cs42888_enum[5]),
-SOC_ENUM("ADC2 Invert Switch", cs42888_enum[6]),
-SOC_ENUM("DAC Auto Mute Switch", cs42888_enum[7]),
-SOC_ENUM("DAC Single Volume Control Switch", cs42888_enum[8]),
-SOC_ENUM("DAC Soft Ramp and Zero Cross Control Switch", cs42888_enum[9]),
-SOC_ENUM("Mute ADC Serial Port Switch", cs42888_enum[10]),
-SOC_ENUM("ADC Single Volume Control Switch", cs42888_enum[11]),
-SOC_ENUM("ADC Soft Ramp and Zero Cross Control Switch", cs42888_enum[12]),
-SOC_ENUM("DAC Deemphasis Switch", cs42888_enum[13]),
-SOC_ENUM("ADC1 Single Ended Mode Switch", cs42888_enum[14]),
-SOC_ENUM("ADC2 Single Ended Mode Switch", cs42888_enum[15]),
+	SOC_CS42888_DOUBLE_R_TLV("DAC1 Playback Volume", CS42888_VOLAOUT1,
+				CS42888_VOLAOUT2, 0, 0xff, 1, dac_tlv),
+	SOC_CS42888_DOUBLE_R_TLV("DAC2 Playback Volume", CS42888_VOLAOUT3,
+				CS42888_VOLAOUT4, 0, 0xff, 1, dac_tlv),
+	SOC_CS42888_DOUBLE_R_TLV("DAC3 Playback Volume", CS42888_VOLAOUT5,
+				CS42888_VOLAOUT6, 0, 0xff, 1, dac_tlv),
+	SOC_CS42888_DOUBLE_R_TLV("DAC4 Playback Volume", CS42888_VOLAOUT7,
+				CS42888_VOLAOUT8, 0, 0xff, 1, dac_tlv),
+	SOC_CS42888_DOUBLE_R_S8_TLV("ADC1 Capture Volume", CS42888_VOLAIN1,
+				CS42888_VOLAIN2, -128, 48, adc_tlv),
+	SOC_CS42888_DOUBLE_R_S8_TLV("ADC2 Capture Volume", CS42888_VOLAIN3,
+				CS42888_VOLAIN4, -128, 48, adc_tlv),
+	SOC_ENUM("ADC High-Pass Filter Switch", cs42888_enum[0]),
+	SOC_ENUM("DAC1 Invert Switch", cs42888_enum[1]),
+	SOC_ENUM("DAC2 Invert Switch", cs42888_enum[2]),
+	SOC_ENUM("DAC3 Invert Switch", cs42888_enum[3]),
+	SOC_ENUM("DAC4 Invert Switch", cs42888_enum[4]),
+	SOC_ENUM("ADC1 Invert Switch", cs42888_enum[5]),
+	SOC_ENUM("ADC2 Invert Switch", cs42888_enum[6]),
+	SOC_ENUM("DAC Auto Mute Switch", cs42888_enum[7]),
+	SOC_ENUM("DAC Single Volume Control Switch", cs42888_enum[8]),
+	SOC_ENUM("DAC Soft Ramp and Zero Cross Control Switch", cs42888_enum[9]),
+	SOC_ENUM("Mute ADC Serial Port Switch", cs42888_enum[10]),
+	SOC_ENUM("ADC Single Volume Control Switch", cs42888_enum[11]),
+	SOC_ENUM("ADC Soft Ramp and Zero Cross Control Switch", cs42888_enum[12]),
+	SOC_ENUM("DAC Deemphasis Switch", cs42888_enum[13]),
+	SOC_ENUM("ADC1 Single Ended Mode Switch", cs42888_enum[14]),
+	SOC_ENUM("ADC2 Single Ended Mode Switch", cs42888_enum[15]),
 };
 
 
 static const struct snd_soc_dapm_widget cs42888_dapm_widgets[] = {
-SND_SOC_DAPM_DAC("DAC1", "Playback", CS42888_PWRCTL, 1, 1),
-SND_SOC_DAPM_DAC("DAC2", "Playback", CS42888_PWRCTL, 2, 1),
-SND_SOC_DAPM_DAC("DAC3", "Playback", CS42888_PWRCTL, 3, 1),
-SND_SOC_DAPM_DAC("DAC4", "Playback", CS42888_PWRCTL, 4, 1),
+	SND_SOC_DAPM_DAC("DAC1", "codec-Playback", CS42888_PWRCTL, 1, 1),
+	SND_SOC_DAPM_DAC("DAC2", "codec-Playback", CS42888_PWRCTL, 2, 1),
+	SND_SOC_DAPM_DAC("DAC3", "codec-Playback", CS42888_PWRCTL, 3, 1),
+	SND_SOC_DAPM_DAC("DAC4", "codec-Playback", CS42888_PWRCTL, 4, 1),
 
-SND_SOC_DAPM_OUTPUT("AOUT1L"),
-SND_SOC_DAPM_OUTPUT("AOUT1R"),
-SND_SOC_DAPM_OUTPUT("AOUT2L"),
-SND_SOC_DAPM_OUTPUT("AOUT2R"),
-SND_SOC_DAPM_OUTPUT("AOUT3L"),
-SND_SOC_DAPM_OUTPUT("AOUT3R"),
-SND_SOC_DAPM_OUTPUT("AOUT4L"),
-SND_SOC_DAPM_OUTPUT("AOUT4R"),
+	SND_SOC_DAPM_OUTPUT("AOUT1L"),
+	SND_SOC_DAPM_OUTPUT("AOUT1R"),
+	SND_SOC_DAPM_OUTPUT("AOUT2L"),
+	SND_SOC_DAPM_OUTPUT("AOUT2R"),
+	SND_SOC_DAPM_OUTPUT("AOUT3L"),
+	SND_SOC_DAPM_OUTPUT("AOUT3R"),
+	SND_SOC_DAPM_OUTPUT("AOUT4L"),
+	SND_SOC_DAPM_OUTPUT("AOUT4R"),
 
-SND_SOC_DAPM_ADC("ADC1", "Capture", CS42888_PWRCTL, 5, 1),
-SND_SOC_DAPM_ADC("ADC2", "Capture", CS42888_PWRCTL, 6, 1),
+	SND_SOC_DAPM_ADC("ADC1", "codec-Capture", CS42888_PWRCTL, 5, 1),
+	SND_SOC_DAPM_ADC("ADC2", "codec-Capture", CS42888_PWRCTL, 6, 1),
 
-SND_SOC_DAPM_INPUT("AIN1L"),
-SND_SOC_DAPM_INPUT("AIN1R"),
-SND_SOC_DAPM_INPUT("AIN2L"),
-SND_SOC_DAPM_INPUT("AIN2R"),
+	SND_SOC_DAPM_INPUT("AIN1L"),
+	SND_SOC_DAPM_INPUT("AIN1R"),
+	SND_SOC_DAPM_INPUT("AIN2L"),
+	SND_SOC_DAPM_INPUT("AIN2R"),
 
-SND_SOC_DAPM_PGA_E("PWR", CS42888_PWRCTL, 0, 1, NULL, 0,
+	SND_SOC_DAPM_PGA_E("PWR", CS42888_PWRCTL, 0, 1, NULL, 0,
 			NULL, 0),
 };
 
@@ -613,13 +460,12 @@ static int cs42888_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		break;
 	default:
 		dev_err(codec->dev, "invalid dai format\n");
-		ret = -EINVAL;
-		return ret;
+		return -EINVAL;
 	}
 
 	ret = snd_soc_write(codec, CS42888_FORMAT, val);
 	if (ret < 0) {
-		pr_err("i2c write failed\n");
+		dev_err(codec->dev, "i2c write failed\n");
 		return ret;
 	}
 
@@ -636,13 +482,12 @@ static int cs42888_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		break;
 	default:
 		/* all other modes are unsupported by the hardware */
-		ret = -EINVAL;
-		return ret;
+		return -EINVAL;
 	}
 
 	ret = snd_soc_write(codec, CS42888_MODE, val);
 	if (ret < 0) {
-		pr_err("i2c write failed\n");
+		dev_err(codec->dev, "i2c write failed\n");
 		return ret;
 	}
 
@@ -670,19 +515,12 @@ static int cs42888_hw_params(struct snd_pcm_substream *substream,
 			    struct snd_soc_dai *dai)
 {
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct imx_pcm_runtime_data *iprtd = substream->runtime->private_data;
 	struct snd_soc_codec *codec = rtd->codec;
 	struct cs42888_private *cs42888 =  snd_soc_codec_get_drvdata(codec);
 	int ret;
-	unsigned int i;
-	unsigned int rate;
-	unsigned int ratio;
-	u32 val;
+	u32 i, rate, ratio, val;
 
-	if (iprtd->asrc_enable)
-		rate = iprtd->p2p->p2p_rate;
-	else
-		rate = params_rate(params);	/* Sampling rate, in Hz */
+	rate = params_rate(params);	/* Sampling rate, in Hz */
 	ratio = cs42888->mclk / rate;	/* MCLK/LRCK ratio */
 	for (i = 0; i < NUM_MCLK_RATIOS; i++) {
 		if (cs42888_mode_ratios[i].ratio == ratio)
@@ -710,7 +548,7 @@ static int cs42888_hw_params(struct snd_pcm_substream *substream,
 	}
 	ret = snd_soc_write(codec, CS42888_MODE, val);
 	if (ret < 0) {
-		pr_err("i2c write failed\n");
+		dev_err(codec->dev, "i2c write failed\n");
 		return ret;
 	}
 
@@ -719,13 +557,13 @@ static int cs42888_hw_params(struct snd_pcm_substream *substream,
 	val &= ~CS42888_MUTE_ALL;
 	ret = snd_soc_write(codec, CS42888_MUTE, val);
 	if (ret < 0) {
-		pr_err("i2c write failed\n");
+		dev_err(codec->dev, "i2c write failed\n");
 		return ret;
 	}
 
 	ret = cs42888_fill_cache(codec);
 	if (ret < 0) {
-		pr_err("failed to fill register cache\n");
+		dev_err(codec->dev, "failed to fill register cache\n");
 		return ret;
 	}
 
@@ -757,9 +595,8 @@ static void cs42888_shutdown(struct snd_pcm_substream *substream,
 		val |= CS42888_MUTE_ALL;
 		ret = snd_soc_write(codec, CS42888_MUTE, val);
 		if (ret < 0)
-			pr_err("i2c write failed\n");
+			dev_err(codec->dev, "i2c write failed\n");
 	}
-
 }
 
 static int cs42888_prepare(struct snd_pcm_substream *substream,
@@ -774,11 +611,8 @@ static int cs42888_prepare(struct snd_pcm_substream *substream,
 	for (i = 0; i < card->num_rtd; i++) {
 		tmp_codec_dai = card->rtd[i].codec_dai;
 		tmp_rtd = (struct snd_soc_pcm_runtime *)(card->rtd + i);
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
-			tmp_codec_dai->pop_wait) {
-			tmp_codec_dai->pop_wait = 0;
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 			cancel_delayed_work(&tmp_rtd->delayed_work);
-		}
 	}
 	return 0;
 }
@@ -792,38 +626,23 @@ static struct snd_soc_dai_ops cs42888_dai_ops = {
 };
 
 
-struct snd_soc_dai_driver cs42888_dai[] = {
-	{
+static struct snd_soc_dai_driver cs42888_dai = {
 	.name = "CS42888",
 	.playback = {
-		.stream_name = "Playback",
+		.stream_name = "codec-Playback",
 		.channels_min = 2,
 		.channels_max = 8,
-		.rates = (SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000 |
-			SNDRV_PCM_RATE_192000),
+		.rates = SNDRV_PCM_RATE_8000_192000,
 		.formats = CS42888_FORMATS,
 	},
 	.capture = {
-		.stream_name = "Capture",
+		.stream_name = "codec-Capture",
 		.channels_min = 2,
 		.channels_max = 4,
-		.rates = (SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000 |
-			SNDRV_PCM_RATE_192000),
+		.rates = SNDRV_PCM_RATE_8000_192000,
 		.formats = CS42888_FORMATS,
 	},
 	.ops = &cs42888_dai_ops,
-	},
-	{
-		.name = "CS42888_ASRC",
-		.playback = {
-			.stream_name = "Playback",
-			.channels_min = 2,
-			.channels_max = 8,
-			.rates = SNDRV_PCM_RATE_8000_192000,
-			.formats = CS42888_FORMATS,
-		},
-		.ops = &cs42888_dai_ops,
-	},
 };
 
 /**
@@ -835,37 +654,34 @@ struct snd_soc_dai_driver cs42888_dai[] = {
  */
 static int cs42888_probe(struct snd_soc_codec *codec)
 {
-	int ret, i;
-	int val;
-
 	struct cs42888_private *cs42888 = snd_soc_codec_get_drvdata(codec);
-	cs42888->codec = codec;
+	int ret, i, val;
 
+	cs42888->codec = codec;
 	/* setup i2c data ops */
 	ret = snd_soc_codec_set_cache_io(codec, 8, 8, SND_SOC_I2C);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to set cache I/O: %d\n", ret);
 		return ret;
 	}
-	if (cpu_is_mx6q() || cpu_is_mx6dl()) {
-		for (i = 0; i < ARRAY_SIZE(cs42888->supplies); i++)
-			cs42888->supplies[i].supply = cs42888_supply_names[i];
 
-		ret = regulator_bulk_get(codec->dev,
-			ARRAY_SIZE(cs42888->supplies), cs42888->supplies);
-		if (ret != 0) {
-			dev_err(codec->dev, "Failed to request supplies: %d\n",
-				ret);
-			return ret;
-		}
+	for (i = 0; i < ARRAY_SIZE(cs42888->supplies); i++)
+		cs42888->supplies[i].supply = cs42888_supply_names[i];
 
-		ret = regulator_bulk_enable(ARRAY_SIZE(cs42888->supplies),
-				cs42888->supplies);
-		if (ret != 0) {
-			dev_err(codec->dev, "Failed to enable supplies: %d\n",
-				ret);
-			goto err;
-		}
+	ret = devm_regulator_bulk_get(codec->dev,
+		ARRAY_SIZE(cs42888->supplies), cs42888->supplies);
+	if (ret) {
+		dev_err(codec->dev, "Failed to request supplies: %d\n",
+			ret);
+		return ret;
+	}
+
+	ret = regulator_bulk_enable(ARRAY_SIZE(cs42888->supplies),
+			cs42888->supplies);
+	if (ret) {
+		dev_err(codec->dev, "Failed to enable supplies: %d\n",
+			ret);
+		goto err;
 	}
 	msleep(1);
 
@@ -882,7 +698,7 @@ static int cs42888_probe(struct snd_soc_codec *codec)
 	ret = snd_soc_write(codec, CS42888_PWRCTL, val);
 	if (ret < 0) {
 		dev_err(codec->dev, "i2c write failed\n");
-		return ret;
+		goto err;
 	}
 
 	/* Disable auto-mute */
@@ -892,22 +708,19 @@ static int cs42888_probe(struct snd_soc_codec *codec)
 	val |=  CS42888_TRANS_DAC_SZC_SR;
 	ret = snd_soc_write(codec, CS42888_TRANS, val);
 	if (ret < 0) {
-		pr_err("i2c write failed\n");
-		return ret;
+		dev_err(codec->dev, "i2c write failed\n");
+		goto err;
 	}
 	/* Add the non-DAPM controls */
-	snd_soc_add_controls(codec, cs42888_snd_controls,
+	snd_soc_add_codec_controls(codec, cs42888_snd_controls,
 				ARRAY_SIZE(cs42888_snd_controls));
 
 	/* Add DAPM controls */
 	cs42888_add_widgets(codec);
-
 	return 0;
 err:
 	regulator_bulk_disable(ARRAY_SIZE(cs42888->supplies),
 						cs42888->supplies);
-	regulator_bulk_free(ARRAY_SIZE(cs42888->supplies),
-				cs42888->supplies);
 	return ret;
 }
 
@@ -923,8 +736,6 @@ static int cs42888_remove(struct snd_soc_codec *codec)
 
 	regulator_bulk_disable(ARRAY_SIZE(cs42888->supplies),
 						cs42888->supplies);
-	regulator_bulk_free(ARRAY_SIZE(cs42888->supplies),
-				cs42888->supplies);
 
 	return 0;
 };
@@ -935,7 +746,7 @@ static int cs42888_remove(struct snd_soc_codec *codec)
  * Assign this variable to the codec_dev field of the machine driver's
  * snd_soc_device structure.
  */
-struct snd_soc_codec_driver cs42888_driver = {
+static struct snd_soc_codec_driver cs42888_driver = {
 	.probe =	cs42888_probe,
 	.remove =	cs42888_remove,
 	.reg_cache_size = CS42888_NUMREGS + 1,
@@ -955,13 +766,12 @@ static int cs42888_i2c_probe(struct i2c_client *i2c_client,
 	const struct i2c_device_id *id)
 {
 	struct cs42888_private *cs42888;
-	int ret;
-	int val;
+	int ret, val;
 
 	/* Verify that we have a CS42888 */
 	val = i2c_smbus_read_byte_data(i2c_client, CS42888_CHIPID);
 	if (val < 0) {
-		pr_err("Device with ID register %x is not a CS42888", val);
+		dev_err(&i2c_client->dev, "Device with ID register %x is not a CS42888", val);
 		return -ENODEV;
 	}
 	/* The top four bits of the chip ID should be 0000. */
@@ -976,27 +786,49 @@ static int cs42888_i2c_probe(struct i2c_client *i2c_client,
 
 	/* Allocate enough space for the snd_soc_codec structure
 	   and our private data together. */
-	cs42888 = kzalloc(sizeof(struct cs42888_private), GFP_KERNEL);
+	cs42888 = devm_kzalloc(&i2c_client->dev, sizeof(struct cs42888_private), GFP_KERNEL);
 	if (!cs42888) {
 		dev_err(&i2c_client->dev, "could not allocate codec\n");
 		return -ENOMEM;
 	}
 
-	if (i2c_client->dev.platform_data) {
-		memcpy(&cs42888->pdata, i2c_client->dev.platform_data,
-				sizeof(cs42888->pdata));
-		cs42888_dai[0].playback.rates = cs42888->pdata.rates;
-		cs42888_dai[0].capture.rates = cs42888->pdata.rates;
-	}
-
 	i2c_set_clientdata(i2c_client, cs42888);
 
+	cs42888->clk = devm_clk_get(&i2c_client->dev, NULL);
+	if (IS_ERR(cs42888->clk)) {
+		ret = PTR_ERR(cs42888->clk);
+		dev_err(&i2c_client->dev, "Cannot get the clock: %d\n", ret);
+		return ret;
+	}
+
+	cs42888->mclk = clk_get_rate(cs42888->clk);
+	switch (cs42888->mclk) {
+	case 24576000:
+		cs42888_dai.playback.rates = SNDRV_PCM_RATE_48000 |
+					     SNDRV_PCM_RATE_96000 |
+					     SNDRV_PCM_RATE_192000;
+		cs42888_dai.capture.rates = SNDRV_PCM_RATE_48000 |
+					     SNDRV_PCM_RATE_96000 |
+					     SNDRV_PCM_RATE_192000;
+		break;
+	case 16934400:
+		cs42888_dai.playback.rates = SNDRV_PCM_RATE_44100 |
+					     SNDRV_PCM_RATE_88200 |
+					     SNDRV_PCM_RATE_176400;
+		cs42888_dai.capture.rates = SNDRV_PCM_RATE_44100 |
+					     SNDRV_PCM_RATE_88200 |
+					     SNDRV_PCM_RATE_176400;
+		break;
+	default:
+		dev_err(&i2c_client->dev, "codec mclk is not supported %d\n", cs42888->mclk);
+		break;
+	}
+
 	ret = snd_soc_register_codec(&i2c_client->dev,
-		&cs42888_driver, cs42888_dai, 2);
+		&cs42888_driver, &cs42888_dai, 1);
 	if (ret) {
 		dev_err(&i2c_client->dev, "Failed to register codec:%d\n", ret);
-		kfree(cs42888);
-	return ret;
+		return ret;
 	}
 	return 0;
 }
@@ -1009,11 +841,7 @@ static int cs42888_i2c_probe(struct i2c_client *i2c_client,
  */
 static int cs42888_i2c_remove(struct i2c_client *i2c_client)
 {
-	struct cs42888_private *cs42888 = i2c_get_clientdata(i2c_client);
-
 	snd_soc_unregister_codec(&i2c_client->dev);
-	kfree(cs42888);
-
 	return 0;
 }
 
@@ -1041,7 +869,6 @@ static int cs42888_i2c_suspend(struct i2c_client *client, pm_message_t mesg)
 	struct cs42888_private *cs42888 = i2c_get_clientdata(client);
 	struct snd_soc_codec *codec = cs42888->codec;
 	int reg = snd_soc_read(codec, CS42888_PWRCTL) | CS42888_PWRCTL_PDN_MASK;
-
 	return snd_soc_write(codec, CS42888_PWRCTL, reg);
 }
 
@@ -1068,7 +895,6 @@ static int cs42888_i2c_resume(struct i2c_client *client)
 	/* ... then disable the power-down bits */
 	reg = snd_soc_read(codec, CS42888_PWRCTL);
 	reg &= ~CS42888_PWRCTL_PDN_MASK;
-
 	return snd_soc_write(codec, CS42888_PWRCTL, reg);
 }
 #else
@@ -1082,10 +908,17 @@ static int cs42888_i2c_resume(struct i2c_client *client)
  * This structure tells the I2C subsystem how to identify and support a
  * given I2C device type.
  */
+
+static const struct of_device_id cs42888_dt_ids[] = {
+	{ .compatible = "cirrus,cs42888", },
+	{ /* sentinel */ }
+};
+
 static struct i2c_driver cs42888_i2c_driver = {
 	.driver = {
 		.name = "cs42888",
 		.owner = THIS_MODULE,
+		.of_match_table = cs42888_dt_ids,
 	},
 	.probe = cs42888_i2c_probe,
 	.remove = cs42888_i2c_remove,
@@ -1094,19 +927,8 @@ static struct i2c_driver cs42888_i2c_driver = {
 	.id_table = cs42888_i2c_id,
 };
 
-static int __init cs42888_init(void)
-{
-	pr_info("Cirrus Logic CS42888 ALSA SoC Codec Driver\n");
-	return i2c_add_driver(&cs42888_i2c_driver);
-}
-module_init(cs42888_init);
+module_i2c_driver(cs42888_i2c_driver);
 
-static void __exit cs42888_exit(void)
-{
-	i2c_del_driver(&cs42888_i2c_driver);
-}
-module_exit(cs42888_exit);
-
-MODULE_AUTHOR("Xu Lionel <R63889@freescale.com>");
+MODULE_AUTHOR("Freescale Semiconductor, Inc.");
 MODULE_DESCRIPTION("Cirrus Logic CS42888 ALSA SoC Codec Driver");
 MODULE_LICENSE("GPL");

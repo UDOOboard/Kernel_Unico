@@ -22,6 +22,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/timerfd.h>
 #include <linux/syscalls.h>
+#include <linux/compat.h>
 #include <linux/rcupdate.h>
 
 struct timerfd_ctx {
@@ -234,19 +235,17 @@ static const struct file_operations timerfd_fops = {
 	.llseek		= noop_llseek,
 };
 
-static struct file *timerfd_fget(int fd)
+static int timerfd_fget(int fd, struct fd *p)
 {
-	struct file *file;
-
-	file = fget(fd);
-	if (!file)
-		return ERR_PTR(-EBADF);
-	if (file->f_op != &timerfd_fops) {
-		fput(file);
-		return ERR_PTR(-EINVAL);
+	struct fd f = fdget(fd);
+	if (!f.file)
+		return -EBADF;
+	if (f.file->f_op != &timerfd_fops) {
+		fdput(f);
+		return -EINVAL;
 	}
-
-	return file;
+	*p = f;
+	return 0;
 }
 
 SYSCALL_DEFINE2(timerfd_create, int, clockid, int, flags)
@@ -280,27 +279,23 @@ SYSCALL_DEFINE2(timerfd_create, int, clockid, int, flags)
 	return ufd;
 }
 
-SYSCALL_DEFINE4(timerfd_settime, int, ufd, int, flags,
-		const struct itimerspec __user *, utmr,
-		struct itimerspec __user *, otmr)
+static int do_timerfd_settime(int ufd, int flags, 
+		const struct itimerspec *new,
+		struct itimerspec *old)
 {
-	struct file *file;
+	struct fd f;
 	struct timerfd_ctx *ctx;
-	struct itimerspec ktmr, kotmr;
 	int ret;
 
-	if (copy_from_user(&ktmr, utmr, sizeof(ktmr)))
-		return -EFAULT;
-
 	if ((flags & ~TFD_SETTIME_FLAGS) ||
-	    !timespec_valid(&ktmr.it_value) ||
-	    !timespec_valid(&ktmr.it_interval))
+	    !timespec_valid(&new->it_value) ||
+	    !timespec_valid(&new->it_interval))
 		return -EINVAL;
 
-	file = timerfd_fget(ufd);
-	if (IS_ERR(file))
-		return PTR_ERR(file);
-	ctx = file->private_data;
+	ret = timerfd_fget(ufd, &f);
+	if (ret)
+		return ret;
+	ctx = f.file->private_data;
 
 	timerfd_setup_cancel(ctx, flags);
 
@@ -325,32 +320,27 @@ SYSCALL_DEFINE4(timerfd_settime, int, ufd, int, flags,
 	if (ctx->expired && ctx->tintv.tv64)
 		hrtimer_forward_now(&ctx->tmr, ctx->tintv);
 
-	kotmr.it_value = ktime_to_timespec(timerfd_get_remaining(ctx));
-	kotmr.it_interval = ktime_to_timespec(ctx->tintv);
+	old->it_value = ktime_to_timespec(timerfd_get_remaining(ctx));
+	old->it_interval = ktime_to_timespec(ctx->tintv);
 
 	/*
 	 * Re-program the timer to the new value ...
 	 */
-	ret = timerfd_setup(ctx, flags, &ktmr);
+	ret = timerfd_setup(ctx, flags, new);
 
 	spin_unlock_irq(&ctx->wqh.lock);
-	fput(file);
-	if (otmr && copy_to_user(otmr, &kotmr, sizeof(kotmr)))
-		return -EFAULT;
-
+	fdput(f);
 	return ret;
 }
 
-SYSCALL_DEFINE2(timerfd_gettime, int, ufd, struct itimerspec __user *, otmr)
+static int do_timerfd_gettime(int ufd, struct itimerspec *t)
 {
-	struct file *file;
+	struct fd f;
 	struct timerfd_ctx *ctx;
-	struct itimerspec kotmr;
-
-	file = timerfd_fget(ufd);
-	if (IS_ERR(file))
-		return PTR_ERR(file);
-	ctx = file->private_data;
+	int ret = timerfd_fget(ufd, &f);
+	if (ret)
+		return ret;
+	ctx = f.file->private_data;
 
 	spin_lock_irq(&ctx->wqh.lock);
 	if (ctx->expired && ctx->tintv.tv64) {
@@ -359,11 +349,65 @@ SYSCALL_DEFINE2(timerfd_gettime, int, ufd, struct itimerspec __user *, otmr)
 			hrtimer_forward_now(&ctx->tmr, ctx->tintv) - 1;
 		hrtimer_restart(&ctx->tmr);
 	}
-	kotmr.it_value = ktime_to_timespec(timerfd_get_remaining(ctx));
-	kotmr.it_interval = ktime_to_timespec(ctx->tintv);
+	t->it_value = ktime_to_timespec(timerfd_get_remaining(ctx));
+	t->it_interval = ktime_to_timespec(ctx->tintv);
 	spin_unlock_irq(&ctx->wqh.lock);
-	fput(file);
+	fdput(f);
+	return 0;
+}
 
+SYSCALL_DEFINE4(timerfd_settime, int, ufd, int, flags,
+		const struct itimerspec __user *, utmr,
+		struct itimerspec __user *, otmr)
+{
+	struct itimerspec new, old;
+	int ret;
+
+	if (copy_from_user(&new, utmr, sizeof(new)))
+		return -EFAULT;
+	ret = do_timerfd_settime(ufd, flags, &new, &old);
+	if (ret)
+		return ret;
+	if (otmr && copy_to_user(otmr, &old, sizeof(old)))
+		return -EFAULT;
+
+	return ret;
+}
+
+SYSCALL_DEFINE2(timerfd_gettime, int, ufd, struct itimerspec __user *, otmr)
+{
+	struct itimerspec kotmr;
+	int ret = do_timerfd_gettime(ufd, &kotmr);
+	if (ret)
+		return ret;
 	return copy_to_user(otmr, &kotmr, sizeof(kotmr)) ? -EFAULT: 0;
 }
 
+#ifdef CONFIG_COMPAT
+COMPAT_SYSCALL_DEFINE4(timerfd_settime, int, ufd, int, flags,
+		const struct compat_itimerspec __user *, utmr,
+		struct compat_itimerspec __user *, otmr)
+{
+	struct itimerspec new, old;
+	int ret;
+
+	if (get_compat_itimerspec(&new, utmr))
+		return -EFAULT;
+	ret = do_timerfd_settime(ufd, flags, &new, &old);
+	if (ret)
+		return ret;
+	if (otmr && put_compat_itimerspec(otmr, &old))
+		return -EFAULT;
+	return ret;
+}
+
+COMPAT_SYSCALL_DEFINE2(timerfd_gettime, int, ufd,
+		struct compat_itimerspec __user *, otmr)
+{
+	struct itimerspec kotmr;
+	int ret = do_timerfd_gettime(ufd, &kotmr);
+	if (ret)
+		return ret;
+	return put_compat_itimerspec(otmr, &kotmr) ? -EFAULT: 0;
+}
+#endif

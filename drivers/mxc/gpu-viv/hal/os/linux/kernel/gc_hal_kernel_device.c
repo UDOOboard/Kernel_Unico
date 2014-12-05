@@ -25,7 +25,9 @@
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/slab.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0)
 #include <mach/hardware.h>
+#endif
 #include <linux/pm_runtime.h>
 
 #define _GC_OBJ_ZONE    gcvZONE_DEVICE
@@ -304,6 +306,7 @@ gckGALDEVICE_Construct(
     IN gctINT Signal,
     IN gctUINT LogFileSize,
     IN struct device *pdev,
+    IN gctINT PowerManagement,
     OUT gckGALDEVICE *Device
     )
 {
@@ -365,11 +368,13 @@ gckGALDEVICE_Construct(
     device->pmdev = pdev;
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,5,0)
-    device->gpu_regulator =(struct regulator*)0xffffffff ;
-#else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)
     /*get gpu regulator*/
     device->gpu_regulator = regulator_get(pdev, "cpu_vddgpu");
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
+    device->gpu_regulator = devm_regulator_get(pdev, "pu");
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0) || LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
     if (IS_ERR(device->gpu_regulator)) {
 	gcmkTRACE_ZONE(gcvLEVEL_ERROR, gcvZONE_DRIVER,
 		"%s(%d): Failed to get gpu regulator  %s/%s \n",
@@ -538,6 +543,9 @@ gckGALDEVICE_Construct(
             device->kernels[gcvCORE_MAJOR]->hardware, FastClear, Compression
             ));
 
+        gcmkONERROR(gckHARDWARE_SetPowerManagement(
+            device->kernels[gcvCORE_MAJOR]->hardware, PowerManagement
+            ));
 
 #if COMMAND_PROCESSOR_VERSION == 1
         /* Start the command queue. */
@@ -593,6 +601,10 @@ gckGALDEVICE_Construct(
             device
             ));
 
+        gcmkONERROR(gckHARDWARE_SetPowerManagement(
+            device->kernels[gcvCORE_2D]->hardware, PowerManagement
+            ));
+
 #if COMMAND_PROCESSOR_VERSION == 1
         /* Start the command queue. */
         gcmkONERROR(gckCOMMAND_Start(device->kernels[gcvCORE_2D]->command));
@@ -624,6 +636,11 @@ gckGALDEVICE_Construct(
             device->coreMapping[gcvHARDWARE_VG] = gcvCORE_VG;
         }
 
+
+        gcmkONERROR(gckVGHARDWARE_SetPowerManagement(
+            device->kernels[gcvCORE_VG]->vg->hardware,
+            PowerManagement
+            ));
 #endif
     }
     else
@@ -838,6 +855,7 @@ gckGALDEVICE_Construct(
             }
             else
             {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0)
                 mem_region = request_mem_region(
                     ContiguousBase, ContiguousSize, "galcore managed memory"
                     );
@@ -853,6 +871,7 @@ gckGALDEVICE_Construct(
 
                     gcmkONERROR(gcvSTATUS_OUT_OF_RESOURCES);
                 }
+#endif
 
                 device->requestedContiguousBase  = ContiguousBase;
                 device->requestedContiguousSize  = ContiguousSize;
@@ -1096,9 +1115,7 @@ gckGALDEVICE_Destroy(
             pm_runtime_disable(Device->pmdev);
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,5,0)
-        /*NULL*/
-#else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0) || LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
         if (Device->gpu_regulator) {
            regulator_put(Device->gpu_regulator);
            Device->gpu_regulator = NULL;

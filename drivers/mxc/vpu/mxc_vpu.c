@@ -27,7 +27,6 @@
 #include <linux/platform_device.h>
 #include <linux/kdev_t.h>
 #include <linux/dma-mapping.h>
-#include <linux/iram_alloc.h>
 #include <linux/wait.h>
 #include <linux/list.h>
 #include <linux/clk.h>
@@ -45,12 +44,35 @@
 #include <linux/types.h>
 #include <linux/memblock.h>
 #include <linux/memory.h>
+#include <linux/version.h>
 #include <asm/page.h>
-#include <asm/sizes.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+#include <linux/module.h>
+#include <linux/pm_runtime.h>
+#include <linux/sizes.h>
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 10, 0)
+#include <linux/iram_alloc.h>
 #include <mach/clock.h>
 #include <mach/hardware.h>
-
 #include <mach/mxc_vpu.h>
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+#include <linux/busfreq-imx6.h>
+#include <linux/clk.h>
+#include <linux/genalloc.h>
+#include <linux/mxc_vpu.h>
+#include <linux/of.h>
+#include <linux/reset.h>
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+#include <mach/busfreq.h>
+#include <mach/common.h>
+#else
+#include <asm/sizes.h>
+#endif
 
 /* Define one new pgprot which combined uncached and XN(never executable) */
 #define pgprot_noncachedxn(prot) \
@@ -64,15 +86,20 @@ struct vpu_priv {
 };
 
 /* To track the allocated memory buffer */
-typedef struct memalloc_record {
+struct memalloc_record {
 	struct list_head list;
 	struct vpu_mem_desc mem;
-} memalloc_record;
+};
 
 struct iram_setting {
 	u32 start;
 	u32 end;
 };
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+static struct gen_pool *iram_pool;
+static u32 iram_base;
+#endif
 
 static LIST_HEAD(head);
 
@@ -91,8 +118,12 @@ static struct vpu_mem_desc vshare_mem = { 0 };
 static void __iomem *vpu_base;
 static int vpu_ipi_irq;
 static u32 phy_vpu_base_addr;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
 static phys_addr_t top_address_DRAM;
 static struct mxc_vpu_platform_data *vpu_plat;
+#endif
+
+static struct device *vpu_dev;
 
 /* IRAM setting */
 static struct iram_setting iram;
@@ -111,11 +142,101 @@ static int vpu_jpu_irq;
 #endif
 
 static unsigned int regBk[64];
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0) || LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
 static struct regulator *vpu_regulator;
+#endif
 static unsigned int pc_before_suspend;
+static atomic_t clk_cnt_from_ioc = ATOMIC_INIT(0);
 
-#define	READ_REG(x)		__raw_readl(vpu_base + x)
-#define	WRITE_REG(val, x)	__raw_writel(val, vpu_base + x)
+#define	READ_REG(x)		readl_relaxed(vpu_base + x)
+#define	WRITE_REG(val, x)	writel_relaxed(val, vpu_base + x)
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+/* redirect to static functions */
+static int cpu_is_mx6dl(void)
+{
+	int ret;
+	ret = of_machine_is_compatible("fsl,imx6dl");
+	return ret;
+}
+
+static int cpu_is_mx6q(void)
+{
+	int ret;
+	ret = of_machine_is_compatible("fsl,imx6q");
+	return ret;
+}
+#endif
+
+static void vpu_reset(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+	device_reset(vpu_dev);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+	imx_src_reset_vpu();
+#else
+	if (vpu_plat->reset)
+		vpu_plat->reset();
+#endif
+}
+
+static long vpu_power_get(bool on)
+{
+	long ret = 0;
+
+	if (on) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
+		vpu_regulator = regulator_get(NULL, "cpu_vddvpu");
+		ret = IS_ERR(vpu_regulator);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+		vpu_regulator = devm_regulator_get(vpu_dev, "pu");
+		ret = IS_ERR(vpu_regulator);
+#endif
+	} else {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0) || LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+		if (!IS_ERR(vpu_regulator))
+			regulator_put(vpu_regulator);
+#endif
+	}
+	return ret;
+}
+
+static void vpu_power_up(bool on)
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0) || LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+	int ret = 0;
+
+	if (on) {
+		if (!IS_ERR(vpu_regulator)) {
+			ret = regulator_enable(vpu_regulator);
+			if (ret)
+				dev_err(vpu_dev, "failed to power up vpu\n");
+		}
+	} else {
+		if (!IS_ERR(vpu_regulator)) {
+			ret = regulator_disable(vpu_regulator);
+			if (ret)
+				dev_err(vpu_dev, "failed to power down vpu\n");
+		}
+	}
+#else
+	imx_gpc_power_up_pu(on);
+#endif
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+static int cpu_is_mx53(void)
+{
+	return 0;
+}
+
+static int cpu_is_mx51(void)
+{
+	return 0;
+}
+
+#define VM_RESERVED 0
+#endif
 
 /*!
  * Private function to alloc dma buffer
@@ -127,9 +248,9 @@ static int vpu_alloc_dma_buffer(struct vpu_mem_desc *mem)
 	    dma_alloc_coherent(NULL, PAGE_ALIGN(mem->size),
 			       (dma_addr_t *) (&mem->phy_addr),
 			       GFP_DMA | GFP_KERNEL);
-	pr_debug("[ALLOC] mem alloc cpu_addr = 0x%x\n", mem->cpu_addr);
+	dev_dbg(vpu_dev, "[ALLOC] mem alloc cpu_addr = 0x%x\n", mem->cpu_addr);
 	if ((void *)(mem->cpu_addr) == NULL) {
-		printk(KERN_ERR "Physical memory allocation error!\n");
+		dev_err(vpu_dev, "Physical memory allocation error!\n");
 		return -1;
 	}
 	return 0;
@@ -159,7 +280,7 @@ static int vpu_free_buffers(void)
 		mem = rec->mem;
 		if (mem.cpu_addr != 0) {
 			vpu_free_dma_buffer(&mem);
-			pr_debug("[FREE] freed paddr=0x%08X\n", mem.phy_addr);
+			dev_dbg(vpu_dev, "[FREE] freed paddr=0x%08X\n", mem.phy_addr);
 			/* delete from list */
 			list_del(&rec->list);
 			kfree(rec);
@@ -182,9 +303,8 @@ static inline void vpu_worker_callback(struct work_struct *w)
 	 * Clock is gated on when dec/enc started, gate it off when
 	 * codec is done.
 	 */
-	if (codec_done) {
+	if (codec_done)
 		codec_done = 0;
-	}
 
 	wake_up_interruptible(&vpu_queue);
 }
@@ -235,8 +355,10 @@ static irqreturn_t vpu_jpu_irq_handler(int irq, void *dev_id)
  */
 bool vpu_is_valid_phy_memory(u32 paddr)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
 	if (paddr > top_address_DRAM)
 		return false;
+#endif
 
 	return true;
 }
@@ -252,14 +374,19 @@ static int vpu_open(struct inode *inode, struct file *filp)
 	mutex_lock(&vpu_data.lock);
 
 	if (open_count++ == 0) {
-		if (!IS_ERR(vpu_regulator))
-			regulator_enable(vpu_regulator);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+		pm_runtime_get_sync(vpu_dev);
+#endif
+		vpu_power_up(true);
 
 #ifdef CONFIG_SOC_IMX6Q
+		clk_prepare(vpu_clk);
 		clk_enable(vpu_clk);
 		if (READ_REG(BIT_CUR_PC))
-			printk(KERN_DEBUG "Not power off before vpu open!\n");
+			dev_dbg(vpu_dev, "Not power off before vpu open!\n");
 		clk_disable(vpu_clk);
+		clk_unprepare(vpu_clk);
 #endif
 	}
 
@@ -295,14 +422,14 @@ static long vpu_ioctl(struct file *filp, u_int cmd,
 				return -EFAULT;
 			}
 
-			pr_debug("[ALLOC] mem alloc size = 0x%x\n",
+			dev_dbg(vpu_dev, "[ALLOC] mem alloc size = 0x%x\n",
 				 rec->mem.size);
 
 			ret = vpu_alloc_dma_buffer(&(rec->mem));
 			if (ret == -1) {
 				kfree(rec);
-				printk(KERN_ERR
-				       "Physical memory allocation error!\n");
+				dev_err(vpu_dev,
+					"Physical memory allocation error!\n");
 				break;
 			}
 			ret = copy_to_user((void __user *)arg, &(rec->mem),
@@ -330,11 +457,10 @@ static long vpu_ioctl(struct file *filp, u_int cmd,
 			if (ret)
 				return -EACCES;
 
-			pr_debug("[FREE] mem freed cpu_addr = 0x%x\n",
+			dev_dbg(vpu_dev, "[FREE] mem freed cpu_addr = 0x%x\n",
 				 vpu_mem.cpu_addr);
-			if ((void *)vpu_mem.cpu_addr != NULL) {
+			if ((void *)vpu_mem.cpu_addr != NULL)
 				vpu_free_dma_buffer(&vpu_mem);
-			}
 
 			mutex_lock(&vpu_data.lock);
 			list_for_each_entry_safe(rec, n, &head, list) {
@@ -355,11 +481,10 @@ static long vpu_ioctl(struct file *filp, u_int cmd,
 			if (!wait_event_interruptible_timeout
 			    (vpu_queue, irq_status != 0,
 			     msecs_to_jiffies(timeout))) {
-				printk(KERN_WARNING "VPU blocking: timeout.\n");
+				dev_warn(vpu_dev, "VPU blocking: timeout.\n");
 				ret = -ETIME;
 			} else if (signal_pending(current)) {
-				printk(KERN_WARNING
-				       "VPU interrupt received.\n");
+				dev_warn(vpu_dev, "VPU interrupt received.\n");
 				ret = -ERESTARTSYS;
 			} else
 				irq_status = 0;
@@ -382,9 +507,13 @@ static long vpu_ioctl(struct file *filp, u_int cmd,
 				return -EFAULT;
 
 			if (clkgate_en) {
+				clk_prepare(vpu_clk);
 				clk_enable(vpu_clk);
+				atomic_inc(&clk_cnt_from_ioc);
 			} else {
 				clk_disable(vpu_clk);
+				clk_unprepare(vpu_clk);
+				atomic_dec(&clk_cnt_from_ioc);
 			}
 
 			break;
@@ -494,9 +623,7 @@ static long vpu_ioctl(struct file *filp, u_int cmd,
 		}
 	case VPU_IOC_SYS_SW_RESET:
 		{
-			if (vpu_plat->reset)
-				vpu_plat->reset();
-
+			vpu_reset();
 			break;
 		}
 	case VPU_IOC_REG_DUMP:
@@ -510,13 +637,13 @@ static long vpu_ioctl(struct file *filp, u_int cmd,
 				     (void __user *)arg,
 				     sizeof(struct vpu_mem_desc));
 		if (ret != 0) {
-			printk(KERN_ERR "copy from user failure:%d\n", ret);
+			dev_err(vpu_dev, "copy from user failure:%d\n", ret);
 			ret = -EFAULT;
 			break;
 		}
 		ret = vpu_is_valid_phy_memory((u32)check_memory.phy_addr);
 
-		pr_debug("vpu: memory phy:0x%x %s phy memory\n",
+		dev_dbg(vpu_dev, "vpu: memory phy:0x%x %s phy memory\n",
 		       check_memory.phy_addr, (ret ? "is" : "isn't"));
 		/* borrow .size to pass back the result. */
 		check_memory.size = ret;
@@ -528,9 +655,23 @@ static long vpu_ioctl(struct file *filp, u_int cmd,
 		}
 		break;
 	}
+	case VPU_IOC_LOCK_DEV:
+		{
+			u32 lock_en;
+
+			if (get_user(lock_en, (u32 __user *) arg))
+				return -EFAULT;
+
+			if (lock_en)
+				mutex_lock(&vpu_data.lock);
+			else
+				mutex_unlock(&vpu_data.lock);
+
+			break;
+		}
 	default:
 		{
-			printk(KERN_ERR "No such IOCTL, cmd is %d\n", cmd);
+			dev_err(vpu_dev, "No such IOCTL, cmd is %d\n", cmd);
 			ret = -EINVAL;
 			break;
 		}
@@ -552,6 +693,7 @@ static int vpu_release(struct inode *inode, struct file *filp)
 	if (open_count > 0 && !(--open_count)) {
 
 		/* Wait for vpu go to idle state */
+		clk_prepare(vpu_clk);
 		clk_enable(vpu_clk);
 		if (READ_REG(BIT_CUR_PC)) {
 
@@ -559,24 +701,27 @@ static int vpu_release(struct inode *inode, struct file *filp)
 			while (READ_REG(BIT_BUSY_FLAG)) {
 				msleep(1);
 				if (time_after(jiffies, timeout)) {
-					printk(KERN_WARNING "VPU timeout during release\n");
+					dev_warn(vpu_dev, "VPU timeout during release\n");
 					break;
 				}
 			}
 			clk_disable(vpu_clk);
+			clk_unprepare(vpu_clk);
 
 			/* Clean up interrupt */
 			cancel_work_sync(&vpu_data.work);
 			flush_workqueue(vpu_data.workqueue);
 			irq_status = 0;
 
+			clk_prepare(vpu_clk);
 			clk_enable(vpu_clk);
 			if (READ_REG(BIT_BUSY_FLAG)) {
 
 				if (cpu_is_mx51() || cpu_is_mx53()) {
-					printk(KERN_ERR
+					dev_err(vpu_dev,
 						"fatal error: can't gate/power off when VPU is busy\n");
 					clk_disable(vpu_clk);
+					clk_unprepare(vpu_clk);
 					mutex_unlock(&vpu_data.lock);
 					return -EFAULT;
 				}
@@ -592,21 +737,21 @@ static int vpu_release(struct inode *inode, struct file *filp)
 					}
 
 					if (READ_REG(0x10F4) != 0x77) {
-						printk(KERN_ERR
+						dev_err(vpu_dev,
 							"fatal error: can't gate/power off when VPU is busy\n");
 						WRITE_REG(0x0, 0x10F0);
 						clk_disable(vpu_clk);
+						clk_unprepare(vpu_clk);
 						mutex_unlock(&vpu_data.lock);
 						return -EFAULT;
-					} else {
-						if (vpu_plat->reset)
-							vpu_plat->reset();
-					}
+					} else
+						vpu_reset();
 				}
 #endif
 			}
 		}
 		clk_disable(vpu_clk);
+		clk_unprepare(vpu_clk);
 
 		vpu_free_buffers();
 
@@ -616,12 +761,17 @@ static int vpu_release(struct inode *inode, struct file *filp)
 		vfree((void *)vshare_mem.cpu_addr);
 		vshare_mem.cpu_addr = 0;
 
-		vpu_clk_usercount = clk_get_usecount(vpu_clk);
-		for (i = 0; i < vpu_clk_usercount; i++)
+		vpu_clk_usercount = atomic_read(&clk_cnt_from_ioc);
+		for (i = 0; i < vpu_clk_usercount; i++) {
 			clk_disable(vpu_clk);
+			clk_unprepare(vpu_clk);
+			atomic_dec(&clk_cnt_from_ioc);
+		}
 
-		if (!IS_ERR(vpu_regulator))
-			regulator_disable(vpu_regulator);
+		vpu_power_up(false);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+		pm_runtime_put_sync_suspend(vpu_dev);
+#endif
 
 	}
 	mutex_unlock(&vpu_data.lock);
@@ -656,7 +806,7 @@ static int vpu_map_hwregs(struct file *fp, struct vm_area_struct *vm)
 	 */
 	vm->vm_page_prot = pgprot_noncachedxn(vm->vm_page_prot);
 	pfn = phy_vpu_base_addr >> PAGE_SHIFT;
-	pr_debug("size=0x%x,  page no.=0x%x\n",
+	dev_dbg(vpu_dev, "size=0x%x, page no.=0x%x\n",
 		 (int)(vm->vm_end - vm->vm_start), (int)pfn);
 	return remap_pfn_range(vm, vm->vm_start, pfn, vm->vm_end - vm->vm_start,
 			       vm->vm_page_prot) ? -EAGAIN : 0;
@@ -671,7 +821,7 @@ static int vpu_map_dma_mem(struct file *fp, struct vm_area_struct *vm)
 	int request_size;
 	request_size = vm->vm_end - vm->vm_start;
 
-	pr_debug(" start=0x%x, pgoff=0x%x, size=0x%x\n",
+	dev_dbg(vpu_dev, "start=0x%x, pgoff=0x%x, size=0x%x\n",
 		 (unsigned int)(vm->vm_start), (unsigned int)(vm->vm_pgoff),
 		 request_size);
 
@@ -714,7 +864,7 @@ static int vpu_mmap(struct file *fp, struct vm_area_struct *vm)
 		return vpu_map_hwregs(fp, vm);
 }
 
-struct file_operations vpu_fops = {
+const struct file_operations vpu_fops = {
 	.owner = THIS_MODULE,
 	.open = vpu_open,
 	.unlocked_ioctl = vpu_ioctl,
@@ -735,6 +885,39 @@ static int vpu_dev_probe(struct platform_device *pdev)
 	struct resource *res;
 	unsigned long addr = 0;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+	struct device_node *np = pdev->dev.of_node;
+	u32 iramsize;
+
+	err = of_property_read_u32(np, "iramsize", (u32 *)&iramsize);
+	if (!err && iramsize)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+	{
+		iram_pool = of_get_named_gen_pool(np, "iram", 0);
+		if (!iram_pool) {
+			dev_err(&pdev->dev, "iram pool not available\n");
+			return -ENOMEM;
+		}
+
+		iram_base = gen_pool_alloc(iram_pool, iramsize);
+		if (!iram_base) {
+			dev_err(&pdev->dev, "unable to alloc iram\n");
+			return -ENOMEM;
+		}
+
+		addr = gen_pool_virt_to_phys(iram_pool, iram_base);
+	}
+#else
+		iram_alloc(iramsize, &addr);
+#endif
+	if (addr == 0)
+		iram.start = iram.end = 0;
+	else {
+		iram.start = addr;
+		iram.end = addr + iramsize - 1;
+	}
+#else
+
 	vpu_plat = pdev->dev.platform_data;
 
 	if (vpu_plat && vpu_plat->iram_enable && vpu_plat->iram_size)
@@ -745,10 +928,13 @@ static int vpu_dev_probe(struct platform_device *pdev)
 		iram.start = addr;
 		iram.end = addr +  vpu_plat->iram_size - 1;
 	}
+#endif
+
+	vpu_dev = &pdev->dev;
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "vpu_regs");
 	if (!res) {
-		printk(KERN_ERR "vpu: unable to get vpu base addr\n");
+		dev_err(vpu_dev, "vpu: unable to get vpu base addr\n");
 		return -ENODEV;
 	}
 	phy_vpu_base_addr = res->start;
@@ -756,7 +942,7 @@ static int vpu_dev_probe(struct platform_device *pdev)
 
 	vpu_major = register_chrdev(vpu_major, "mxc_vpu", &vpu_fops);
 	if (vpu_major < 0) {
-		printk(KERN_ERR "vpu: unable to get a major for VPU\n");
+		dev_err(vpu_dev, "vpu: unable to get a major for VPU\n");
 		err = -EBUSY;
 		goto error;
 	}
@@ -782,7 +968,7 @@ static int vpu_dev_probe(struct platform_device *pdev)
 
 	vpu_ipi_irq = platform_get_irq_byname(pdev, "vpu_ipi_irq");
 	if (vpu_ipi_irq < 0) {
-		printk(KERN_ERR "vpu: unable to get vpu interrupt\n");
+		dev_err(vpu_dev, "vpu: unable to get vpu interrupt\n");
 		err = -ENXIO;
 		goto err_out_class;
 	}
@@ -790,24 +976,21 @@ static int vpu_dev_probe(struct platform_device *pdev)
 			  (void *)(&vpu_data));
 	if (err)
 		goto err_out_class;
-	vpu_regulator = regulator_get(NULL, "cpu_vddvpu");
-	if (IS_ERR(vpu_regulator)) {
+	if (vpu_power_get(true)) {
 		if (!(cpu_is_mx51() || cpu_is_mx53())) {
-			printk(KERN_ERR
-				"%s: failed to get vpu regulator\n", __func__);
+			dev_err(vpu_dev, "failed to get vpu power\n");
 			goto err_out_class;
 		} else {
 			/* regulator_get will return error on MX5x,
 			 * just igore it everywhere*/
-			printk(KERN_WARNING
-				"%s: failed to get vpu regulator\n", __func__);
+			dev_warn(vpu_dev, "failed to get vpu power\n");
 		}
 	}
 
 #ifdef MXC_VPU_HAS_JPU
 	vpu_jpu_irq = platform_get_irq_byname(pdev, "vpu_jpu_irq");
 	if (vpu_jpu_irq < 0) {
-		printk(KERN_ERR "vpu: unable to get vpu jpu interrupt\n");
+		dev_err(vpu_dev, "vpu: unable to get vpu jpu interrupt\n");
 		err = -ENXIO;
 		free_irq(vpu_ipi_irq, &vpu_data);
 		goto err_out_class;
@@ -820,20 +1003,24 @@ static int vpu_dev_probe(struct platform_device *pdev)
 	}
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+	pm_runtime_enable(&pdev->dev);
+#endif
+
 	vpu_data.workqueue = create_workqueue("vpu_wq");
 	INIT_WORK(&vpu_data.work, vpu_worker_callback);
 	mutex_init(&vpu_data.lock);
-	printk(KERN_INFO "VPU initialized\n");
+	dev_info(vpu_dev, "VPU initialized\n");
 	goto out;
 
-      err_out_class:
+err_out_class:
 	device_destroy(vpu_class, MKDEV(vpu_major, 0));
 	class_destroy(vpu_class);
-      err_out_chrdev:
+err_out_chrdev:
 	unregister_chrdev(vpu_major, "mxc_vpu");
-      error:
+error:
 	iounmap(vpu_base);
-      out:
+out:
 	return err;
 }
 
@@ -848,15 +1035,28 @@ static int vpu_dev_remove(struct platform_device *pdev)
 	destroy_workqueue(vpu_data.workqueue);
 
 	iounmap(vpu_base);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+	if (iram.start)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+		gen_pool_free(iram_pool, iram_base, iram.end-iram.start+1);
+#else
+		iram_free(iram.start, iram.end-iram.start+1);
+#endif
+#else
 	if (vpu_plat && vpu_plat->iram_enable && vpu_plat->iram_size)
 		iram_free(iram.start,  vpu_plat->iram_size);
-	if (!IS_ERR(vpu_regulator))
-		regulator_put(vpu_regulator);
+#endif
+
+	vpu_power_get(false);
 	return 0;
 }
 
 #ifdef CONFIG_PM
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+static int vpu_suspend(struct device *dev)
+#else
 static int vpu_suspend(struct platform_device *pdev, pm_message_t state)
+#endif
 {
 	int i;
 	unsigned long timeout;
@@ -868,28 +1068,35 @@ static int vpu_suspend(struct platform_device *pdev, pm_message_t state)
 		 * power is already off on MX6,
 		 * gate power on MX51 */
 		if (cpu_is_mx51()) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
 			if (vpu_plat->pg)
 				vpu_plat->pg(1);
+#endif
 		}
 	} else {
 		/* Wait for vpu go to idle state, suspect vpu cannot be changed
 		   to idle state after about 1 sec */
 		timeout = jiffies + HZ;
+		clk_prepare(vpu_clk);
 		clk_enable(vpu_clk);
 		while (READ_REG(BIT_BUSY_FLAG)) {
 			msleep(1);
 			if (time_after(jiffies, timeout)) {
 				clk_disable(vpu_clk);
+				clk_unprepare(vpu_clk);
 				mutex_unlock(&vpu_data.lock);
 				return -EAGAIN;
 			}
 		}
 		clk_disable(vpu_clk);
+		clk_unprepare(vpu_clk);
 
 		/* Make sure clock is disabled before suspend */
-		vpu_clk_usercount = clk_get_usecount(vpu_clk);
-		for (i = 0; i < vpu_clk_usercount; i++)
+		vpu_clk_usercount = atomic_read(&clk_cnt_from_ioc);
+		for (i = 0; i < vpu_clk_usercount; i++) {
 			clk_disable(vpu_clk);
+			clk_unprepare(vpu_clk);
+		}
 
 		if (cpu_is_mx53()) {
 			mutex_unlock(&vpu_data.lock);
@@ -897,28 +1104,35 @@ static int vpu_suspend(struct platform_device *pdev, pm_message_t state)
 		}
 
 		if (bitwork_mem.cpu_addr != 0) {
+			clk_prepare(vpu_clk);
 			clk_enable(vpu_clk);
 			/* Save 64 registers from BIT_CODE_BUF_ADDR */
 			for (i = 0; i < 64; i++)
 				regBk[i] = READ_REG(BIT_CODE_BUF_ADDR + (i * 4));
 			pc_before_suspend = READ_REG(BIT_CUR_PC);
 			clk_disable(vpu_clk);
+			clk_unprepare(vpu_clk);
 		}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
 		if (vpu_plat->pg)
 			vpu_plat->pg(1);
+#endif
 
 		/* If VPU is working before suspend, disable
 		 * regulator to make usecount right. */
-		if (!IS_ERR(vpu_regulator))
-			regulator_disable(vpu_regulator);
+		vpu_power_up(false);
 	}
 
 	mutex_unlock(&vpu_data.lock);
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+static int vpu_resume(struct device *dev)
+#else
 static int vpu_resume(struct platform_device *pdev)
+#endif
 {
 	int i;
 
@@ -929,8 +1143,10 @@ static int vpu_resume(struct platform_device *pdev)
 		 * power should be kept off on MX6,
 		 * disable power gating on MX51 */
 		if (cpu_is_mx51()) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
 			if (vpu_plat->pg)
 				vpu_plat->pg(0);
+#endif
 		}
 	} else {
 		if (cpu_is_mx53())
@@ -938,11 +1154,11 @@ static int vpu_resume(struct platform_device *pdev)
 
 		/* If VPU is working before suspend, enable
 		 * regulator to make usecount right. */
-		if (!IS_ERR(vpu_regulator))
-			regulator_enable(vpu_regulator);
-
+		vpu_power_up(true);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
 		if (vpu_plat->pg)
 			vpu_plat->pg(0);
+#endif
 
 		if (bitwork_mem.cpu_addr != 0) {
 			u32 *p = (u32 *) bitwork_mem.cpu_addr;
@@ -950,12 +1166,14 @@ static int vpu_resume(struct platform_device *pdev)
 			u16 data_hi;
 			u16 data_lo;
 
+			clk_prepare(vpu_clk);
 			clk_enable(vpu_clk);
 
 			pc = READ_REG(BIT_CUR_PC);
 			if (pc) {
-				printk(KERN_WARNING "Not power off after suspend (PC=0x%x)\n", pc);
+				dev_warn(vpu_dev, "Not power off after suspend (PC=0x%x)\n", pc);
 				clk_disable(vpu_clk);
+				clk_unprepare(vpu_clk);
 				goto recover_clk;
 			}
 
@@ -997,24 +1215,55 @@ static int vpu_resume(struct platform_device *pdev)
 				while (READ_REG(BIT_BUSY_FLAG))
 					;
 			} else {
-				printk(KERN_WARNING "PC=0 before suspend\n");
+				dev_warn(vpu_dev, "PC=0 before suspend\n");
 			}
 			clk_disable(vpu_clk);
+			clk_unprepare(vpu_clk);
 		}
 
 recover_clk:
 		/* Recover vpu clock */
-		for (i = 0; i < vpu_clk_usercount; i++)
+		for (i = 0; i < vpu_clk_usercount; i++) {
+			clk_prepare(vpu_clk);
 			clk_enable(vpu_clk);
+		}
 	}
 
 	mutex_unlock(&vpu_data.lock);
 	return 0;
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+static int vpu_runtime_suspend(struct device *dev)
+{
+	release_bus_freq(BUS_FREQ_HIGH);
+	return 0;
+}
+
+static int vpu_runtime_resume(struct device *dev)
+{
+	request_bus_freq(BUS_FREQ_HIGH);
+	return 0;
+}
+
+static const struct dev_pm_ops vpu_pm_ops = {
+	SET_RUNTIME_PM_OPS(vpu_runtime_suspend, vpu_runtime_resume, NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(vpu_suspend, vpu_resume)
+};
+#endif
+
 #else
 #define	vpu_suspend	NULL
 #define	vpu_resume	NULL
 #endif				/* !CONFIG_PM */
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+static const struct of_device_id vpu_of_match[] = {
+	{ .compatible = "fsl,imx6-vpu", },
+	{/* sentinel */}
+};
+MODULE_DEVICE_TABLE(of, vpu_of_match);
+#endif
 
 /*! Driver definition
  *
@@ -1022,11 +1271,19 @@ recover_clk:
 static struct platform_driver mxcvpu_driver = {
 	.driver = {
 		   .name = "mxc_vpu",
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+		   .of_match_table = vpu_of_match,
+#ifdef CONFIG_PM
+		   .pm = &vpu_pm_ops,
+#endif
+#endif
 		   },
 	.probe = vpu_dev_probe,
 	.remove = vpu_dev_remove,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
 	.suspend = vpu_suspend,
 	.resume = vpu_resume,
+#endif
 };
 
 static int __init vpu_init(void)
@@ -1036,8 +1293,10 @@ static int __init vpu_init(void)
 	init_waitqueue_head(&vpu_queue);
 
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 5, 0)
 	memblock_analyze();
 	top_address_DRAM = memblock_end_of_DRAM_with_reserved();
+#endif
 
 	return ret;
 }
@@ -1054,6 +1313,15 @@ static void __exit vpu_exit(void)
 	vpu_free_dma_buffer(&bitwork_mem);
 	vpu_free_dma_buffer(&pic_para_mem);
 	vpu_free_dma_buffer(&user_data_mem);
+
+	/* reset VPU state */
+	vpu_power_up(true);
+	clk_prepare(vpu_clk);
+	clk_enable(vpu_clk);
+	vpu_reset();
+	clk_disable(vpu_clk);
+	clk_unprepare(vpu_clk);
+	vpu_power_up(false);
 
 	clk_put(vpu_clk);
 

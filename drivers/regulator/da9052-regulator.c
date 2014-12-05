@@ -1,13 +1,17 @@
 /*
- * Copyright(c) 2009 Dialog Semiconductor Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * da9052-regulator.c: Regulator driver for DA9052
- */
+* da9052-regulator.c: Regulator driver for DA9052
+*
+* Copyright(c) 2011 Dialog Semiconductor Ltd.
+*
+* Author: David Dajun Chen <dchen@diasemi.com>
+*
+* This program is free software; you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation; either version 2 of the License, or
+* (at your option) any later version.
+*
+*/
+
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -15,460 +19,403 @@
 #include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
+#ifdef CONFIG_OF
+#include <linux/of.h>
+#include <linux/regulator/of_regulator.h>
+#endif
 
 #include <linux/mfd/da9052/da9052.h>
 #include <linux/mfd/da9052/reg.h>
-#include <linux/mfd/da9052/pm.h>
+#include <linux/mfd/da9052/pdata.h>
 
-static struct regulator_ops da9052_ldo_buck_ops;
+/* Buck step size */
+#define DA9052_BUCK_PERI_3uV_STEP		100000
+#define DA9052_BUCK_PERI_REG_MAP_UPTO_3uV	24
+#define DA9052_CONST_3uV			3000000
 
+#define DA9052_MIN_UA		0
+#define DA9052_MAX_UA		3
+#define DA9052_CURRENT_RANGE	4
 
-struct regulator {
-	struct device *dev;
-	struct list_head list;
-	int uA_load;
+/* Bit masks */
+#define DA9052_BUCK_ILIM_MASK_EVEN	0x0c
+#define DA9052_BUCK_ILIM_MASK_ODD	0xc0
+
+/* DA9052 REGULATOR IDs */
+#define DA9052_ID_BUCK1		0
+#define DA9052_ID_BUCK2		1
+#define DA9052_ID_BUCK3		2
+#define DA9052_ID_BUCK4		3
+#define DA9052_ID_LDO1		4
+#define DA9052_ID_LDO2		5
+#define DA9052_ID_LDO3		6
+#define DA9052_ID_LDO4		7
+#define DA9052_ID_LDO5		8
+#define DA9052_ID_LDO6		9
+#define DA9052_ID_LDO7		10
+#define DA9052_ID_LDO8		11
+#define DA9052_ID_LDO9		12
+#define DA9052_ID_LDO10		13
+
+static const u32 da9052_current_limits[3][4] = {
+	{700000, 800000, 1000000, 1200000},	/* DA9052-BC BUCKs */
+	{1600000, 2000000, 2400000, 3000000},	/* DA9053-AA/Bx BUCK-CORE */
+	{800000, 1000000, 1200000, 1500000},	/* DA9053-AA/Bx BUCK-PRO,
+						 * BUCK-MEM and BUCK-PERI
+						*/
+};
+
+struct da9052_regulator_info {
+	struct regulator_desc reg_desc;
+	int step_uV;
 	int min_uV;
 	int max_uV;
-	int enabled; /* client has called enabled */
-	char *supply_name;
-	struct device_attribute dev_attr;
+};
+
+struct da9052_regulator {
+	struct da9052 *da9052;
+	struct da9052_regulator_info *info;
 	struct regulator_dev *rdev;
 };
 
-
-
-
-#define DA9052_LDO(_id, max, min, step_v, reg, mbits, cbits) \
-{\
-		.reg_desc	= {\
-		.name		= #_id,\
-		.ops		= &da9052_ldo_buck_ops,\
-		.type		= REGULATOR_VOLTAGE,\
-		.id			= _id,\
-		.owner		= THIS_MODULE,\
-	},\
-	.reg_const = {\
-		.max_uV		= (max) * 1000,\
-		.min_uV		= (min) * 1000,\
-		.valid_ops_mask	= REGULATOR_CHANGE_VOLTAGE\
-		| REGULATOR_CHANGE_STATUS | REGULATOR_CHANGE_MODE,\
-		.valid_modes_mask = REGULATOR_MODE_NORMAL,\
-	},\
-		.step_uV		= (step_v) * 1000,\
-		.reg_add		= (reg),\
-		.mask_bits		= (mbits),\
-		.en_bit_mask	= (cbits),\
-}
-
-struct regulator_info {
-	struct regulator_desc reg_desc;
-	struct regulation_constraints reg_const;
-	int step_uV;
-	unsigned char reg_add;
-	unsigned char mask_bits;
-	unsigned char en_bit_mask;
-};
-
-struct da9052_regulator_priv {
-	struct da9052 *da9052;
-	struct regulator_dev *regulators[];
-};
-
-struct regulator_info da9052_regulators[] = {
-	/* LD01 - LDO10*/
-	DA9052_LDO(DA9052_LDO1, DA9052_LDO1_VOLT_UPPER, DA9052_LDO1_VOLT_LOWER,
-			DA9052_LDO1_VOLT_STEP, DA9052_LDO1_REG,
-			DA9052_LDO1_VLDO1, DA9052_LDO1_LDO1EN),
-
-	DA9052_LDO(DA9052_LDO2,
-			DA9052_LDO2_VOLT_UPPER, DA9052_LDO2_VOLT_LOWER,
-			DA9052_LDO2_VOLT_STEP, DA9052_LDO2_REG,
-			DA9052_LDO2_VLDO2,
-			DA9052_LDO2_LDO2EN),
-
-	DA9052_LDO(DA9052_LDO3, DA9052_LDO34_VOLT_UPPER,
-			DA9052_LDO34_VOLT_LOWER,
-			DA9052_LDO34_VOLT_STEP, DA9052_LDO3_REG,
-			DA9052_LDO3_VLDO3, DA9052_LDO3_LDO3EN),
-
-	DA9052_LDO(DA9052_LDO4, DA9052_LDO34_VOLT_UPPER,
-			DA9052_LDO34_VOLT_LOWER,
-			DA9052_LDO34_VOLT_STEP, DA9052_LDO4_REG,
-			DA9052_LDO4_VLDO4, DA9052_LDO4_LDO4EN),
-
-	DA9052_LDO(DA9052_LDO5, DA9052_LDO567810_VOLT_UPPER,
-			DA9052_LDO567810_VOLT_LOWER,
-			DA9052_LDO567810_VOLT_STEP, DA9052_LDO5_REG,
-			DA9052_LDO5_VLDO5, DA9052_LDO5_LDO5EN),
-
-	DA9052_LDO(DA9052_LDO6, DA9052_LDO567810_VOLT_UPPER,
-			DA9052_LDO567810_VOLT_LOWER,
-			DA9052_LDO567810_VOLT_STEP, DA9052_LDO6_REG,
-			DA9052_LDO6_VLDO6, DA9052_LDO6_LDO6EN),
-
-	DA9052_LDO(DA9052_LDO7, DA9052_LDO567810_VOLT_UPPER,
-			DA9052_LDO567810_VOLT_LOWER,
-			DA9052_LDO567810_VOLT_STEP, DA9052_LDO7_REG,
-			DA9052_LDO7_VLDO7, DA9052_LDO7_LDO7EN),
-
-	DA9052_LDO(DA9052_LDO8, DA9052_LDO567810_VOLT_UPPER,
-			DA9052_LDO567810_VOLT_LOWER,
-			DA9052_LDO567810_VOLT_STEP, DA9052_LDO8_REG,
-			DA9052_LDO8_VLDO8, DA9052_LDO8_LDO8EN),
-
-	DA9052_LDO(DA9052_LDO9, DA9052_LDO9_VOLT_UPPER,
-			DA9052_LDO9_VOLT_LOWER,
-			DA9052_LDO9_VOLT_STEP,
-			DA9052_LDO9_REG, DA9052_LDO9_VLDO9,
-			DA9052_LDO9_LDO9EN),
-
-	DA9052_LDO(DA9052_LDO10, DA9052_LDO567810_VOLT_UPPER,
-			DA9052_LDO567810_VOLT_LOWER,
-			DA9052_LDO567810_VOLT_STEP, DA9052_LDO10_REG,
-			DA9052_LDO10_VLDO10, DA9052_LDO10_LDO10EN),
-
-	/* BUCKS */
-	DA9052_LDO(DA9052_BUCK_CORE, DA9052_BUCK_CORE_PRO_VOLT_UPPER,
-			DA9052_BUCK_CORE_PRO_VOLT_LOWER,
-			DA9052_BUCK_CORE_PRO_STEP, DA9052_BUCKCORE_REG,
-			DA9052_BUCKCORE_VBCORE, DA9052_BUCKCORE_BCOREEN),
-
-	DA9052_LDO(DA9052_BUCK_PRO, DA9052_BUCK_CORE_PRO_VOLT_UPPER,
-			DA9052_BUCK_CORE_PRO_VOLT_LOWER,
-			DA9052_BUCK_CORE_PRO_STEP, DA9052_BUCKPRO_REG,
-			DA9052_BUCKPRO_VBPRO, DA9052_BUCKPRO_BPROEN),
-
-	DA9052_LDO(DA9052_BUCK_MEM, DA9052_BUCK_MEM_VOLT_UPPER,
-			DA9052_BUCK_MEM_VOLT_LOWER,
-			DA9052_BUCK_MEM_STEP, DA9052_BUCKMEM_REG,
-			DA9052_BUCKMEM_VBMEM, DA9052_BUCKMEM_BMEMEN),
-#if defined (CONFIG_PMIC_DA9052)
-	DA9052_LDO(DA9052_BUCK_PERI, DA9052_BUCK_PERI_VOLT_UPPER,
-			DA9052_BUCK_PERI_VOLT_LOWER,
-			DA9052_BUCK_PERI_STEP_BELOW_3000, DA9052_BUCKPERI_REG,
-			DA9052_BUCKPERI_VBPERI, DA9052_BUCKPERI_BPERIEN),
-#elif defined (CONFIG_PMIC_DA9053AA) || (CONFIG_PMIC_DA9053Bx)
-	DA9052_LDO(DA9052_BUCK_PERI, DA9052_BUCK_PERI_VOLT_UPPER,
-			DA9052_BUCK_PERI_VOLT_LOWER,
-			DA9052_BUCK_PERI_STEP, DA9052_BUCKPERI_REG,
-			DA9052_BUCKPERI_VBPERI, DA9052_BUCKPERI_BPERIEN),
-#endif
-};
-
-int da9052_ldo_buck_enable(struct regulator_dev *rdev)
+static int verify_range(struct da9052_regulator_info *info,
+			 int min_uV, int max_uV)
 {
-	struct da9052_regulator_priv *priv = rdev_get_drvdata(rdev);
-	int id = rdev_get_id(rdev);
-	int ret = 0;
-	struct da9052_ssc_msg ssc_msg;
-
-	ssc_msg.addr = da9052_regulators[id].reg_add;
-	ssc_msg.data = 0;
-
-	da9052_lock(priv->da9052);
-	ret = priv->da9052->read(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
-
-	ssc_msg.data = (ssc_msg.data | da9052_regulators[id].en_bit_mask);
-
-	ret = priv->da9052->write(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
-	da9052_unlock(priv->da9052);
+	if (min_uV > info->max_uV || max_uV < info->min_uV)
+		return -EINVAL;
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(da9052_ldo_buck_enable);
-/* Code added to support additional attribure in sysfs - changestate */
 
-
-
-int da9052_ldo_buck_disable(struct regulator_dev *rdev)
+static int da9052_dcdc_get_current_limit(struct regulator_dev *rdev)
 {
-	struct da9052_regulator_priv *priv = rdev_get_drvdata(rdev);
-	int id = rdev_get_id(rdev);
-	int ret;
-	struct da9052_ssc_msg ssc_msg;
+	struct da9052_regulator *regulator = rdev_get_drvdata(rdev);
+	int offset = rdev_get_id(rdev);
+	int ret, row = 2;
 
-	ssc_msg.addr = da9052_regulators[id].reg_add;
-	ssc_msg.data = 0;
+	ret = da9052_reg_read(regulator->da9052, DA9052_BUCKA_REG + offset/2);
+	if (ret < 0)
+		return ret;
 
-	da9052_lock(priv->da9052);
-	ret = priv->da9052->read(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
+	/* Determine the even or odd position of the buck current limit
+	 * register field
+	*/
+	if (offset % 2 == 0)
+		ret = (ret & DA9052_BUCK_ILIM_MASK_EVEN) >> 2;
+	else
+		ret = (ret & DA9052_BUCK_ILIM_MASK_ODD) >> 6;
 
-	ssc_msg.data = (ssc_msg.data & ~(da9052_regulators[id].en_bit_mask));
+	/* Select the appropriate current limit range */
+	if (regulator->da9052->chip_id == DA9052)
+		row = 0;
+	else if (offset == 0)
+		row = 1;
 
-	ret = priv->da9052->write(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
-	da9052_unlock(priv->da9052);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(da9052_ldo_buck_disable);
-/* Code added to support additional attribure in sysfs - changestate */
-
-static int da9052_ldo_buck_is_enabled(struct regulator_dev *rdev)
-{
-	struct da9052_regulator_priv *priv = rdev_get_drvdata(rdev);
-	int id = rdev_get_id(rdev);
-	int ret;
-	struct da9052_ssc_msg ssc_msg;
-	ssc_msg.addr = da9052_regulators[id].reg_add;
-	ssc_msg.data = 0;
-
-	da9052_lock(priv->da9052);
-	ret = priv->da9052->read(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
-	da9052_unlock(priv->da9052);
-	return (ssc_msg.data & da9052_regulators[id].en_bit_mask) != 0;
+	return da9052_current_limits[row][ret];
 }
 
-int da9052_ldo_buck_set_voltage(struct regulator_dev *rdev,
-					int min_uV, int max_uV,
-					unsigned *selector)
+static int da9052_dcdc_set_current_limit(struct regulator_dev *rdev, int min_uA,
+					  int max_uA)
 {
-	struct da9052_regulator_priv *priv = rdev_get_drvdata(rdev);
-	struct da9052_ssc_msg ssc_msg;
-	int id = rdev_get_id(rdev);
-	int ret;
-	int ldo_volt = 0;
-	selector;
+	struct da9052_regulator *regulator = rdev_get_drvdata(rdev);
+	int offset = rdev_get_id(rdev);
+	int reg_val = 0;
+	int i, row = 2;
 
-	/* Below if condition is there for added setvoltage attribute
-	in sysfs */
-	if (0 == max_uV)
-		max_uV = da9052_regulators[id].reg_const.max_uV;
+	/* Select the appropriate current limit range */
+	if (regulator->da9052->chip_id == DA9052)
+		row = 0;
+	else if (offset == 0)
+		row = 1;
 
-	/* Compare voltage range */
-	if (min_uV > max_uV)
-		return -EINVAL;
-
-	/* Check Minimum/ Maximum voltage range */
-	if (min_uV < da9052_regulators[id].reg_const.min_uV ||
-		min_uV > da9052_regulators[id].reg_const.max_uV)
-		return -EINVAL;
-	if (max_uV < da9052_regulators[id].reg_const.min_uV ||
-		max_uV > da9052_regulators[id].reg_const.max_uV)
-		return -EINVAL;
-#if defined (CONFIG_PMIC_DA9052)
-	/* Get the ldo register value */
-	/* Varying step size for BUCK PERI */
-	if ((da9052_regulators[id].reg_desc.id == DA9052_BUCK_PERI) &&
-			(min_uV >= DA9052_BUCK_PERI_VALUES_3000)) {
-		ldo_volt = (DA9052_BUCK_PERI_VALUES_3000 -
-			da9052_regulators[id].reg_const.min_uV)/
-			(da9052_regulators[id].step_uV);
-		ldo_volt += (min_uV - DA9052_BUCK_PERI_VALUES_3000)/
-			(DA9052_BUCK_PERI_STEP_ABOVE_3000);
-	} else{
-		ldo_volt = (min_uV - da9052_regulators[id].reg_const.min_uV)/
-			(da9052_regulators[id].step_uV);
-		/* Check for maximum value */
-		if ((ldo_volt * da9052_regulators[id].step_uV) +
-			da9052_regulators[id].reg_const.min_uV > max_uV)
-			return -EINVAL;
-	}
-#elif defined (CONFIG_PMIC_DA9053AA) ||(CONFIG_PMIC_DA9053Bx)
-	ldo_volt = (min_uV - da9052_regulators[id].reg_const.min_uV)/
-		(da9052_regulators[id].step_uV);
-	/* Check for maximum value */
-	if ((ldo_volt * da9052_regulators[id].step_uV) +
-		da9052_regulators[id].reg_const.min_uV > max_uV)
-		return -EINVAL;
-#endif
-	/* Configure LDO Voltage, CONF bits */
-	ssc_msg.addr = da9052_regulators[id].reg_add;
-	ssc_msg.data = 0;
-
-	/* Read register */
-	da9052_lock(priv->da9052);
-	ret = priv->da9052->read(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
-
-	ssc_msg.data = (ssc_msg.data & ~(da9052_regulators[id].mask_bits));
-	ssc_msg.data |= ldo_volt;
-
-	ret = priv->da9052->write(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
-
-	/* Set the GO LDO/BUCk bits so that the voltage changes */
-	ssc_msg.addr = DA9052_SUPPLY_REG;
-	ssc_msg.data = 0;
-
-	ret = priv->da9052->read(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
-
-	switch (id) {
-	case DA9052_LDO2:
-		ssc_msg.data = (ssc_msg.data | DA9052_SUPPLY_VLDO2GO);
-	break;
-	case DA9052_LDO3:
-		ssc_msg.data = (ssc_msg.data | DA9052_SUPPLY_VLDO3GO);
-	break;
-	case DA9052_BUCK_CORE:
-		ssc_msg.data = (ssc_msg.data | DA9052_SUPPLY_VBCOREGO);
-	break;
-	case DA9052_BUCK_PRO:
-		ssc_msg.data = (ssc_msg.data | DA9052_SUPPLY_VBPROGO);
-	break;
-	case DA9052_BUCK_MEM:
-		ssc_msg.data = (ssc_msg.data | DA9052_SUPPLY_VBMEMGO);
-	break;
-	default:
-		da9052_unlock(priv->da9052);
-		return -EINVAL;
-	}
-
-	ret = priv->da9052->write(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
-
-	da9052_unlock(priv->da9052);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(da9052_ldo_buck_set_voltage);
-/* Code added to support additional attributes in sysfs - setvoltage */
-
-
-int da9052_ldo_buck_get_voltage(struct regulator_dev *rdev)
-{
-	struct da9052_regulator_priv *priv = rdev_get_drvdata(rdev);
-	struct da9052_ssc_msg ssc_msg;
-	int id = rdev_get_id(rdev);
-	int ldo_volt = 0;
-	int ldo_volt_uV = 0;
-	int ret;
-
-	ssc_msg.addr = da9052_regulators[id].reg_add;
-	ssc_msg.data = 0;
-	/* Read register */
-	da9052_lock(priv->da9052);
-	ret = priv->da9052->read(priv->da9052, &ssc_msg);
-	if (ret) {
-		da9052_unlock(priv->da9052);
-		return -EIO;
-	}
-	da9052_unlock(priv->da9052);
-
-	ldo_volt = ssc_msg.data & da9052_regulators[id].mask_bits;
-#if defined (CONFIG_PMIC_DA9052)
-	if (da9052_regulators[id].reg_desc.id == DA9052_BUCK_PERI) {
-		if (ldo_volt >= DA9052_BUCK_PERI_VALUES_UPTO_3000) {
-			ldo_volt_uV = ((DA9052_BUCK_PERI_VALUES_UPTO_3000 *
-				da9052_regulators[id].step_uV)
-				+ da9052_regulators[id].reg_const.min_uV);
-			ldo_volt_uV = (ldo_volt_uV +
-				(ldo_volt - DA9052_BUCK_PERI_VALUES_UPTO_3000)
-				* (DA9052_BUCK_PERI_STEP_ABOVE_3000));
-		} else {
-			ldo_volt_uV =
-				(ldo_volt * da9052_regulators[id].step_uV)
-				+ da9052_regulators[id].reg_const.min_uV;
+	for (i = DA9052_CURRENT_RANGE - 1; i >= 0; i--) {
+		if ((min_uA <= da9052_current_limits[row][i]) &&
+		    (da9052_current_limits[row][i] <= max_uA)) {
+			reg_val = i;
+			break;
 		}
+	}
+
+	if (i < 0)
+		return -EINVAL;
+
+	/* Determine the even or odd position of the buck current limit
+	 * register field
+	*/
+	if (offset % 2 == 0)
+		return da9052_reg_update(regulator->da9052,
+					 DA9052_BUCKA_REG + offset/2,
+					 DA9052_BUCK_ILIM_MASK_EVEN,
+					 reg_val << 2);
+	else
+		return da9052_reg_update(regulator->da9052,
+					 DA9052_BUCKA_REG + offset/2,
+					 DA9052_BUCK_ILIM_MASK_ODD,
+					 reg_val << 6);
+}
+
+static int da9052_list_voltage(struct regulator_dev *rdev,
+				unsigned int selector)
+{
+	struct da9052_regulator *regulator = rdev_get_drvdata(rdev);
+	struct da9052_regulator_info *info = regulator->info;
+	int id = rdev_get_id(rdev);
+	int volt_uV;
+
+	if ((id == DA9052_ID_BUCK4) && (regulator->da9052->chip_id == DA9052)
+		&& (selector >= DA9052_BUCK_PERI_REG_MAP_UPTO_3uV)) {
+		volt_uV = ((DA9052_BUCK_PERI_REG_MAP_UPTO_3uV * info->step_uV)
+			  + info->min_uV);
+		volt_uV += (selector - DA9052_BUCK_PERI_REG_MAP_UPTO_3uV)
+				    * (DA9052_BUCK_PERI_3uV_STEP);
 	} else {
-		ldo_volt_uV = (ldo_volt * da9052_regulators[id].step_uV) +
-				da9052_regulators[id].reg_const.min_uV;
+		volt_uV = (selector * info->step_uV) + info->min_uV;
 	}
-#elif defined (CONFIG_PMIC_DA9053AA) || (CONFIG_PMIC_DA9053Bx)
-	ldo_volt_uV = (ldo_volt * da9052_regulators[id].step_uV) +
-			da9052_regulators[id].reg_const.min_uV;
-#endif
-	return ldo_volt_uV;
+
+	if (volt_uV > info->max_uV)
+		return -EINVAL;
+
+	return volt_uV;
 }
-EXPORT_SYMBOL_GPL(da9052_ldo_buck_get_voltage);
-/* Code added to support additional attributes in sysfs - setvoltage */
 
+static int da9052_map_voltage(struct regulator_dev *rdev,
+			      int min_uV, int max_uV)
+{
+	struct da9052_regulator *regulator = rdev_get_drvdata(rdev);
+	struct da9052_regulator_info *info = regulator->info;
+	int id = rdev_get_id(rdev);
+	int ret, sel;
 
-static struct regulator_ops da9052_ldo_buck_ops = {
-	.is_enabled = da9052_ldo_buck_is_enabled,
-	.enable = da9052_ldo_buck_enable,
-	.disable = da9052_ldo_buck_disable,
-	.get_voltage = da9052_ldo_buck_get_voltage,
-	.set_voltage = da9052_ldo_buck_set_voltage,
+	ret = verify_range(info, min_uV, max_uV);
+	if (ret < 0)
+		return ret;
+
+	if (min_uV < info->min_uV)
+		min_uV = info->min_uV;
+
+	if ((id == DA9052_ID_BUCK4) && (regulator->da9052->chip_id == DA9052)
+		&& (min_uV >= DA9052_CONST_3uV)) {
+			sel = DA9052_BUCK_PERI_REG_MAP_UPTO_3uV +
+			      DIV_ROUND_UP(min_uV - DA9052_CONST_3uV,
+					   DA9052_BUCK_PERI_3uV_STEP);
+	} else {
+		sel = DIV_ROUND_UP(min_uV - info->min_uV, info->step_uV);
+	}
+
+	ret = da9052_list_voltage(rdev, sel);
+	if (ret < 0)
+		return ret;
+
+	return sel;
+}
+
+static struct regulator_ops da9052_dcdc_ops = {
+	.get_current_limit = da9052_dcdc_get_current_limit,
+	.set_current_limit = da9052_dcdc_set_current_limit,
+
+	.list_voltage = da9052_list_voltage,
+	.map_voltage = da9052_map_voltage,
+	.get_voltage_sel = regulator_get_voltage_sel_regmap,
+	.set_voltage_sel = regulator_set_voltage_sel_regmap,
+	.is_enabled = regulator_is_enabled_regmap,
+	.enable = regulator_enable_regmap,
+	.disable = regulator_disable_regmap,
 };
 
-static int __devinit da9052_regulator_probe(struct platform_device *pdev)
-{
-	struct da9052_regulator_priv *priv;
-	struct da9052_regulator_platform_data *pdata =
-				(pdev->dev.platform_data);
-	struct da9052 *da9052 = dev_get_drvdata(pdev->dev.parent);
-	struct regulator_init_data  *init_data;
-	int i, ret = 0;
+static struct regulator_ops da9052_ldo_ops = {
+	.list_voltage = da9052_list_voltage,
+	.map_voltage = da9052_map_voltage,
+	.get_voltage_sel = regulator_get_voltage_sel_regmap,
+	.set_voltage_sel = regulator_set_voltage_sel_regmap,
+	.is_enabled = regulator_is_enabled_regmap,
+	.enable = regulator_enable_regmap,
+	.disable = regulator_disable_regmap,
+};
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
-	if (priv == NULL)
-		return -ENOMEM;
-
-	priv->da9052 = da9052;
-	for (i = 0; i < 14; i++) {
-
-		init_data = &pdata->regulators[i];
-		init_data->driver_data = da9052;
-		pdev->dev.platform_data = init_data;
-		priv->regulators[i] = regulator_register(
-				&da9052_regulators[i].reg_desc,
-				&pdev->dev, init_data,
-				priv);
-		if (IS_ERR(priv->regulators[i])) {
-			ret = PTR_ERR(priv->regulators[i]);
-			goto err;
-		}
-	}
-	platform_set_drvdata(pdev, priv);
-	return 0;
-err:
-	while (--i >= 0)
-		regulator_unregister(priv->regulators[i]);
-	kfree(priv);
-	return ret;
+#define DA9052_LDO(_id, step, min, max, sbits, ebits, abits) \
+{\
+	.reg_desc = {\
+		.name = #_id,\
+		.ops = &da9052_ldo_ops,\
+		.type = REGULATOR_VOLTAGE,\
+		.id = DA9052_ID_##_id,\
+		.n_voltages = (max - min) / step + 1, \
+		.owner = THIS_MODULE,\
+		.vsel_reg = DA9052_BUCKCORE_REG + DA9052_ID_##_id, \
+		.vsel_mask = (1 << (sbits)) - 1,\
+		.apply_reg = DA9052_SUPPLY_REG, \
+		.apply_bit = (abits), \
+		.enable_reg = DA9052_BUCKCORE_REG + DA9052_ID_##_id, \
+		.enable_mask = 1 << (ebits),\
+	},\
+	.min_uV = (min) * 1000,\
+	.max_uV = (max) * 1000,\
+	.step_uV = (step) * 1000,\
 }
 
-static int __devexit da9052_regulator_remove(struct platform_device *pdev)
+#define DA9052_DCDC(_id, step, min, max, sbits, ebits, abits) \
+{\
+	.reg_desc = {\
+		.name = #_id,\
+		.ops = &da9052_dcdc_ops,\
+		.type = REGULATOR_VOLTAGE,\
+		.id = DA9052_ID_##_id,\
+		.n_voltages = (max - min) / step + 1, \
+		.owner = THIS_MODULE,\
+		.vsel_reg = DA9052_BUCKCORE_REG + DA9052_ID_##_id, \
+		.vsel_mask = (1 << (sbits)) - 1,\
+		.apply_reg = DA9052_SUPPLY_REG, \
+		.apply_bit = (abits), \
+		.enable_reg = DA9052_BUCKCORE_REG + DA9052_ID_##_id, \
+		.enable_mask = 1 << (ebits),\
+	},\
+	.min_uV = (min) * 1000,\
+	.max_uV = (max) * 1000,\
+	.step_uV = (step) * 1000,\
+}
+
+static struct da9052_regulator_info da9052_regulator_info[] = {
+	DA9052_DCDC(BUCK1, 25, 500, 2075, 6, 6, DA9052_SUPPLY_VBCOREGO),
+	DA9052_DCDC(BUCK2, 25, 500, 2075, 6, 6, DA9052_SUPPLY_VBPROGO),
+	DA9052_DCDC(BUCK3, 25, 925, 2500, 6, 6, DA9052_SUPPLY_VBMEMGO),
+	DA9052_DCDC(BUCK4, 50, 1800, 3600, 5, 6, 0),
+	DA9052_LDO(LDO1, 50, 600, 1800, 5, 6, 0),
+	DA9052_LDO(LDO2, 25, 600, 1800, 6, 6, DA9052_SUPPLY_VLDO2GO),
+	DA9052_LDO(LDO3, 25, 1725, 3300, 6, 6, DA9052_SUPPLY_VLDO3GO),
+	DA9052_LDO(LDO4, 25, 1725, 3300, 6, 6, 0),
+	DA9052_LDO(LDO5, 50, 1200, 3600, 6, 6, 0),
+	DA9052_LDO(LDO6, 50, 1200, 3600, 6, 6, 0),
+	DA9052_LDO(LDO7, 50, 1200, 3600, 6, 6, 0),
+	DA9052_LDO(LDO8, 50, 1200, 3600, 6, 6, 0),
+	DA9052_LDO(LDO9, 50, 1250, 3650, 6, 6, 0),
+	DA9052_LDO(LDO10, 50, 1200, 3600, 6, 6, 0),
+};
+
+static struct da9052_regulator_info da9053_regulator_info[] = {
+	DA9052_DCDC(BUCK1, 25, 500, 2075, 6, 6, DA9052_SUPPLY_VBCOREGO),
+	DA9052_DCDC(BUCK2, 25, 500, 2075, 6, 6, DA9052_SUPPLY_VBPROGO),
+	DA9052_DCDC(BUCK3, 25, 925, 2500, 6, 6, DA9052_SUPPLY_VBMEMGO),
+	DA9052_DCDC(BUCK4, 25, 925, 2500, 6, 6, 0),
+	DA9052_LDO(LDO1, 50, 600, 1800, 5, 6, 0),
+	DA9052_LDO(LDO2, 25, 600, 1800, 6, 6, DA9052_SUPPLY_VLDO2GO),
+	DA9052_LDO(LDO3, 25, 1725, 3300, 6, 6, DA9052_SUPPLY_VLDO3GO),
+	DA9052_LDO(LDO4, 25, 1725, 3300, 6, 6, 0),
+	DA9052_LDO(LDO5, 50, 1200, 3600, 6, 6, 0),
+	DA9052_LDO(LDO6, 50, 1200, 3600, 6, 6, 0),
+	DA9052_LDO(LDO7, 50, 1200, 3600, 6, 6, 0),
+	DA9052_LDO(LDO8, 50, 1200, 3600, 6, 6, 0),
+	DA9052_LDO(LDO9, 50, 1250, 3650, 6, 6, 0),
+	DA9052_LDO(LDO10, 50, 1200, 3600, 6, 6, 0),
+};
+
+static inline struct da9052_regulator_info *find_regulator_info(u8 chip_id,
+								 int id)
 {
-	struct da9052_regulator_priv *priv = platform_get_drvdata(pdev);
-	struct da9052_platform_data *pdata = pdev->dev.platform_data;
+	struct da9052_regulator_info *info;
 	int i;
 
-	for (i = 0; i < pdata->num_regulators; i++)
-		regulator_unregister(priv->regulators[i]);
+	switch (chip_id) {
+	case DA9052:
+		for (i = 0; i < ARRAY_SIZE(da9052_regulator_info); i++) {
+			info = &da9052_regulator_info[i];
+			if (info->reg_desc.id == id)
+				return info;
+		}
+		break;
+	case DA9053_AA:
+	case DA9053_BA:
+	case DA9053_BB:
+		for (i = 0; i < ARRAY_SIZE(da9053_regulator_info); i++) {
+			info = &da9053_regulator_info[i];
+			if (info->reg_desc.id == id)
+				return info;
+		}
+		break;
+	}
 
+	return NULL;
+}
+
+static int da9052_regulator_probe(struct platform_device *pdev)
+{
+	struct regulator_config config = { };
+	struct da9052_regulator *regulator;
+	struct da9052 *da9052;
+	struct da9052_pdata *pdata;
+
+	regulator = devm_kzalloc(&pdev->dev, sizeof(struct da9052_regulator),
+				 GFP_KERNEL);
+	if (!regulator)
+		return -ENOMEM;
+
+	da9052 = dev_get_drvdata(pdev->dev.parent);
+	pdata = da9052->dev->platform_data;
+	regulator->da9052 = da9052;
+
+	regulator->info = find_regulator_info(regulator->da9052->chip_id,
+					      pdev->id);
+	if (regulator->info == NULL) {
+		dev_err(&pdev->dev, "invalid regulator ID specified\n");
+		return -EINVAL;
+	}
+
+	config.dev = &pdev->dev;
+	config.driver_data = regulator;
+	config.regmap = da9052->regmap;
+	if (pdata && pdata->regulators) {
+		config.init_data = pdata->regulators[pdev->id];
+	} else {
+#ifdef CONFIG_OF
+		struct device_node *nproot, *np;
+
+		nproot = of_node_get(da9052->dev->of_node);
+		if (!nproot)
+			return -ENODEV;
+
+		nproot = of_find_node_by_name(nproot, "regulators");
+		if (!nproot)
+			return -ENODEV;
+
+		for_each_child_of_node(nproot, np) {
+			if (!of_node_cmp(np->name,
+					 regulator->info->reg_desc.name)) {
+				config.init_data = of_get_regulator_init_data(
+					&pdev->dev, np);
+				config.of_node = np;
+				break;
+			}
+		}
+		of_node_put(nproot);
+#endif
+	}
+
+	regulator->rdev = regulator_register(&regulator->info->reg_desc,
+					     &config);
+	if (IS_ERR(regulator->rdev)) {
+		dev_err(&pdev->dev, "failed to register regulator %s\n",
+			regulator->info->reg_desc.name);
+		return PTR_ERR(regulator->rdev);
+	}
+
+	platform_set_drvdata(pdev, regulator);
+
+	return 0;
+}
+
+static int da9052_regulator_remove(struct platform_device *pdev)
+{
+	struct da9052_regulator *regulator = platform_get_drvdata(pdev);
+
+	regulator_unregister(regulator->rdev);
 	return 0;
 }
 
 static struct platform_driver da9052_regulator_driver = {
-	.probe		= da9052_regulator_probe,
-	.remove		= __devexit_p(da9052_regulator_remove),
-	.driver		= {
-		.name	= DRIVER_NAME,
-		.owner	= THIS_MODULE,
+	.probe = da9052_regulator_probe,
+	.remove = da9052_regulator_remove,
+	.driver = {
+		.name = "da9052-regulator",
+		.owner = THIS_MODULE,
 	},
 };
 
@@ -486,5 +433,5 @@ module_exit(da9052_regulator_exit);
 
 MODULE_AUTHOR("David Dajun Chen <dchen@diasemi.com>");
 MODULE_DESCRIPTION("Power Regulator driver for Dialog DA9052 PMIC");
-MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:" DRIVER_NAME);
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:da9052-regulator");

@@ -50,14 +50,9 @@
  * by the buffer lock.
  */
 
-#include <linux/init.h>
-#include <linux/fs.h>
-#include <linux/slab.h>
-#include <linux/ext3_jbd.h>
-#include <linux/ext3_fs.h>
+#include "ext3.h"
 #include <linux/mbcache.h>
 #include <linux/quotaops.h>
-#include <linux/rwsem.h>
 #include "xattr.h"
 #include "acl.h"
 
@@ -818,10 +813,10 @@ inserted:
 			ea_idebug(inode, "creating block %d", block);
 
 			new_bh = sb_getblk(sb, block);
-			if (!new_bh) {
+			if (unlikely(!new_bh)) {
 getblk_failed:
 				ext3_free_blocks(handle, inode, block, 1);
-				error = -EIO;
+				error = -ENOMEM;
 				goto cleanup;
 			}
 			lock_buffer(new_bh);

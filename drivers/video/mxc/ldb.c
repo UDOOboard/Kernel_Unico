@@ -26,6 +26,7 @@
  */
 #include <linux/types.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/err.h>
 #include <linux/clk.h>
@@ -35,9 +36,8 @@
 #include <linux/mxcfb.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spinlock.h>
-#include <linux/fsl_devices.h>
-#include <mach/hardware.h>
-#include <mach/clock.h>
+#include <linux/of_device.h>
+#include <linux/mod_devicetable.h>
 #include "mxc_dispdrv.h"
 
 #define DISPDRV_LDB	"ldb"
@@ -78,6 +78,34 @@
 
 #define LDB_SPLIT_MODE_EN		0x00000010
 
+enum {
+	IMX6_LDB,
+};
+
+enum {
+	LDB_IMX6 = 1,
+};
+
+struct fsl_mxc_ldb_platform_data {
+	int devtype;
+	u32 ext_ref;
+#define LDB_SPL_DI0	1
+#define LDB_SPL_DI1	2
+#define LDB_DUL_DI0	3
+#define LDB_DUL_DI1	4
+#define LDB_SIN0	5
+#define LDB_SIN1	6
+#define LDB_SEP0	7
+#define LDB_SEP1	8
+	int mode;
+	int ipu_id;
+	int disp_id;
+
+	/*only work for separate mode*/
+	int sec_ipu_id;
+	int sec_disp_id;
+};
+
 struct ldb_data {
 	struct platform_device *pdev;
 	struct mxc_dispdrv_handle *disp_ldb;
@@ -91,6 +119,9 @@ struct ldb_data {
 	struct ldb_setting {
 		struct clk *di_clk;
 		struct clk *ldb_di_clk;
+		struct clk *div_3_5_clk;
+		struct clk *div_7_clk;
+		struct clk *div_sel_clk;
 		bool active;
 		bool clk_en;
 		int ipu;
@@ -105,26 +136,10 @@ static int g_ldb_mode;
 
 static struct fb_videomode ldb_modedb[] = {
 	{
-	 "LDB-WVGA", 57, 800, 480, 30060, // Rif. 800x480 Panel DATAVISION dtfs070d0shlx
-	 56, 50, 
-	 23, 20,
-	 150, 2,
-	 0,
-	 FB_VMODE_NONINTERLACED,
-	 FB_MODE_IS_DETAILED,},
-        {
-	 "LDB-SVGA", 57, 800, 600, 25000, // Rif. Panel 800x600
-	 40, 60,
-	 10, 10,
-	 20, 10,
-	 0,
-	 FB_VMODE_NONINTERLACED,
-	 FB_MODE_IS_DETAILED,},
-	{
-	 "LDB-WXGA", 60, 1368, 768, 12960, // Rif. 1366x768 Panel G156XW01V0
-	 9, 3,
-	 2, 7,
-	 200, 38,
+	 "LDB-WXGA", 60, 1280, 800, 14065,
+	 40, 40,
+	 10, 3,
+	 80, 10,
 	 0,
 	 FB_VMODE_NONINTERLACED,
 	 FB_MODE_IS_DETAILED,},
@@ -145,8 +160,12 @@ static struct fb_videomode ldb_modedb[] = {
 	 FB_VMODE_NONINTERLACED,
 	 FB_MODE_IS_DETAILED,},
 };
-
 static int ldb_modedb_sz = ARRAY_SIZE(ldb_modedb);
+
+static inline int is_imx6_ldb(struct fsl_mxc_ldb_platform_data *plat_data)
+{
+	return (plat_data->devtype == LDB_IMX6);
+}
 
 static int bits_per_pixel(int pixel_fmt)
 {
@@ -175,6 +194,33 @@ static int valid_mode(int pixel_fmt)
 		(pixel_fmt == IPU_PIX_FMT_BGR666));
 }
 
+static int parse_ldb_mode(char *mode)
+{
+	int ldb_mode;
+
+	if (!strcmp(mode, "spl0"))
+		ldb_mode = LDB_SPL_DI0;
+	else if (!strcmp(mode, "spl1"))
+		ldb_mode = LDB_SPL_DI1;
+	else if (!strcmp(mode, "dul0"))
+		ldb_mode = LDB_DUL_DI0;
+	else if (!strcmp(mode, "dul1"))
+		ldb_mode = LDB_DUL_DI1;
+	else if (!strcmp(mode, "sin0"))
+		ldb_mode = LDB_SIN0;
+	else if (!strcmp(mode, "sin1"))
+		ldb_mode = LDB_SIN1;
+	else if (!strcmp(mode, "sep0"))
+		ldb_mode = LDB_SEP0;
+	else if (!strcmp(mode, "sep1"))
+		ldb_mode = LDB_SEP1;
+	else
+		ldb_mode = -EINVAL;
+
+	return ldb_mode;
+}
+
+#ifndef MODULE
 /*
  *    "ldb=spl0/1"       --      split mode on DI0/1
  *    "ldb=dul0/1"       --      dual mode on DI0/1
@@ -194,26 +240,62 @@ static int valid_mode(int pixel_fmt)
  */
 static int __init ldb_setup(char *options)
 {
-	if (!strcmp(options, "spl0"))
-		g_ldb_mode = LDB_SPL_DI0;
-	else if (!strcmp(options, "spl1"))
-		g_ldb_mode = LDB_SPL_DI1;
-	else if (!strcmp(options, "dul0"))
-		g_ldb_mode = LDB_DUL_DI0;
-	else if (!strcmp(options, "dul1"))
-		g_ldb_mode = LDB_DUL_DI1;
-	else if (!strcmp(options, "sin0"))
-		g_ldb_mode = LDB_SIN0;
-	else if (!strcmp(options, "sin1"))
-		g_ldb_mode = LDB_SIN1;
-	else if (!strcmp(options, "sep0"))
-		g_ldb_mode = LDB_SEP0;
-	else if (!strcmp(options, "sep1"))
-		g_ldb_mode = LDB_SEP1;
-
-	return 1;
+	g_ldb_mode = parse_ldb_mode(options);
+	return (g_ldb_mode < 0) ? 0 : 1;
 }
 __setup("ldb=", ldb_setup);
+#endif
+
+static int ldb_get_of_property(struct platform_device *pdev,
+				struct fsl_mxc_ldb_platform_data *plat_data)
+{
+	struct device_node *np = pdev->dev.of_node;
+	int err;
+	u32 ipu_id, disp_id;
+	u32 sec_ipu_id, sec_disp_id;
+	char *mode;
+	u32 ext_ref;
+
+	err = of_property_read_string(np, "mode", (const char **)&mode);
+	if (err) {
+		dev_dbg(&pdev->dev, "get of property mode fail\n");
+		return err;
+	}
+	err = of_property_read_u32(np, "ext_ref", &ext_ref);
+	if (err) {
+		dev_dbg(&pdev->dev, "get of property ext_ref fail\n");
+		return err;
+	}
+	err = of_property_read_u32(np, "ipu_id", &ipu_id);
+	if (err) {
+		dev_dbg(&pdev->dev, "get of property ipu_id fail\n");
+		return err;
+	}
+	err = of_property_read_u32(np, "disp_id", &disp_id);
+	if (err) {
+		dev_dbg(&pdev->dev, "get of property disp_id fail\n");
+		return err;
+	}
+	err = of_property_read_u32(np, "sec_ipu_id", &sec_ipu_id);
+	if (err) {
+		dev_dbg(&pdev->dev, "get of property sec_ipu_id fail\n");
+		return err;
+	}
+	err = of_property_read_u32(np, "sec_disp_id", &sec_disp_id);
+	if (err) {
+		dev_dbg(&pdev->dev, "get of property sec_disp_id fail\n");
+		return err;
+	}
+
+	plat_data->mode = parse_ldb_mode(mode);
+	plat_data->ext_ref = ext_ref;
+	plat_data->ipu_id = ipu_id;
+	plat_data->disp_id = disp_id;
+	plat_data->sec_ipu_id = sec_ipu_id;
+	plat_data->sec_disp_id = sec_disp_id;
+
+	return err;
+}
 
 static int find_ldb_setting(struct ldb_data *ldb, struct fb_info *fbi)
 {
@@ -244,6 +326,7 @@ static int ldb_disp_setup(struct mxc_dispdrv_handle *disp, struct fb_info *fbi)
 	struct clk *ldb_clk_parent;
 	struct ldb_data *ldb = mxc_dispdrv_getdata(disp);
 	int setting_idx, di;
+	int ret;
 
 	setting_idx = find_ldb_setting(ldb, fbi);
 	if (setting_idx < 0)
@@ -279,17 +362,37 @@ static int ldb_disp_setup(struct mxc_dispdrv_handle *disp, struct fb_info *fbi)
 
 	/* clk setup */
 	if (ldb->setting[setting_idx].clk_en)
-		clk_disable(ldb->setting[setting_idx].ldb_di_clk);
+		 clk_disable_unprepare(ldb->setting[setting_idx].ldb_di_clk);
 	pixel_clk = (PICOS2KHZ(fbi->var.pixclock)) * 1000UL;
 	ldb_clk_parent = clk_get_parent(ldb->setting[setting_idx].ldb_di_clk);
+	if (IS_ERR(ldb_clk_parent)) {
+		dev_err(&ldb->pdev->dev, "get ldb di parent clk fail\n");
+		return PTR_ERR(ldb_clk_parent);
+	}
 	if ((ldb->mode == LDB_SPL_DI0) || (ldb->mode == LDB_SPL_DI1))
-		clk_set_rate(ldb_clk_parent, pixel_clk * 7 / 2);
+		ret = clk_set_rate(ldb_clk_parent, pixel_clk * 7 / 2);
 	else
-		clk_set_rate(ldb_clk_parent, pixel_clk * 7);
+		ret = clk_set_rate(ldb_clk_parent, pixel_clk * 7);
+	if (ret < 0) {
+		dev_err(&ldb->pdev->dev, "set ldb parent clk fail:%d\n", ret);
+		return ret;
+	}
 	rounded_pixel_clk = clk_round_rate(ldb->setting[setting_idx].ldb_di_clk,
-			pixel_clk);
-	clk_set_rate(ldb->setting[setting_idx].ldb_di_clk, rounded_pixel_clk);
-	clk_enable(ldb->setting[setting_idx].ldb_di_clk);
+						pixel_clk);
+	dev_dbg(&ldb->pdev->dev, "pixel_clk:%d, rounded_pixel_clk:%d\n",
+			pixel_clk, rounded_pixel_clk);
+	ret = clk_set_rate(ldb->setting[setting_idx].ldb_di_clk,
+				rounded_pixel_clk);
+	if (ret < 0) {
+		dev_err(&ldb->pdev->dev, "set ldb di clk fail:%d\n", ret);
+		return ret;
+	}
+	ret = clk_prepare_enable(ldb->setting[setting_idx].ldb_di_clk);
+	if (ret < 0) {
+		dev_err(&ldb->pdev->dev, "enable ldb di clk fail:%d\n", ret);
+		return ret;
+	}
+
 	if (!ldb->setting[setting_idx].clk_en)
 		ldb->setting[setting_idx].clk_en = true;
 
@@ -426,14 +529,18 @@ static int ldb_ipu_ldb_route(int ipu, int di, struct ldb_data *ldb)
 static int ldb_disp_init(struct mxc_dispdrv_handle *disp,
 	struct mxc_dispdrv_setting *setting)
 {
-	int ret = 0, i;
+	int ret = 0, i, lvds_channel = 0;
 	struct ldb_data *ldb = mxc_dispdrv_getdata(disp);
 	struct fsl_mxc_ldb_platform_data *plat_data = ldb->pdev->dev.platform_data;
 	struct resource *res;
-	uint32_t base_addr;
 	uint32_t reg, setting_idx;
 	uint32_t ch_mask = 0, ch_val = 0;
 	uint32_t ipu_id, disp_id;
+	char di_clk[] = "ipu1_di0_sel";
+	char ldb_clk[] = "ldb_di0";
+	char div_3_5_clk[] = "di0_div_3_5";
+	char div_7_clk[] = "di0_div_7";
+	char div_sel_clk[] = "di0_div_sel";
 
 	/* if input format not valid, make RGB666 as default*/
 	if (!valid_mode(setting->if_fmt)) {
@@ -443,25 +550,17 @@ static int ldb_disp_init(struct mxc_dispdrv_handle *disp,
 	}
 
 	if (!ldb->inited) {
-		char di_clk[] = "ipu1_di0_clk";
-		char ldb_clk[] = "ldb_di0_clk";
-		int lvds_channel = 0;
-
 		setting_idx = 0;
 		res = platform_get_resource(ldb->pdev, IORESOURCE_MEM, 0);
-		if (IS_ERR(res))
+		if (!res) {
+			dev_err(&ldb->pdev->dev, "get iomem fail.\n");
 			return -ENOMEM;
+		}
 
-		base_addr = res->start;
-		ldb->reg = ioremap(base_addr, res->end - res->start + 1);
+		ldb->reg = devm_ioremap(&ldb->pdev->dev, res->start,
+					resource_size(res));
 		ldb->control_reg = ldb->reg + 2;
 		ldb->gpr3_reg = ldb->reg + 3;
-
-		ldb->lvds_bg_reg = regulator_get(&ldb->pdev->dev, plat_data->lvds_bg_reg);
-		if (!IS_ERR(ldb->lvds_bg_reg)) {
-			regulator_set_voltage(ldb->lvds_bg_reg, 2500000, 2500000);
-			regulator_enable(ldb->lvds_bg_reg);
-		}
 
 		/* ipu selected by platform data setting */
 		setting->dev_id = plat_data->ipu_id;
@@ -488,7 +587,7 @@ static int ldb_disp_init(struct mxc_dispdrv_handle *disp,
 		else
 			reg |= LDB_DATA_WIDTH_CH0_18 | LDB_DATA_WIDTH_CH1_18;
 
-		if (g_ldb_mode)
+		if (g_ldb_mode >= LDB_SPL_DI0)
 			ldb->mode = g_ldb_mode;
 		else
 			ldb->mode = plat_data->mode;
@@ -503,7 +602,7 @@ static int ldb_disp_init(struct mxc_dispdrv_handle *disp,
 				plat_data->disp_id = ret;
 			}
 		} else if (((ldb->mode == LDB_SEP0) || (ldb->mode == LDB_SEP1))
-				&& (cpu_is_mx6q() || cpu_is_mx6dl())) {
+				&& is_imx6_ldb(plat_data)) {
 			if (plat_data->disp_id == plat_data->sec_disp_id) {
 				dev_err(&ldb->pdev->dev,
 					"For LVDS separate mode,"
@@ -601,46 +700,7 @@ static int ldb_disp_init(struct mxc_dispdrv_handle *disp,
 			ch_mask = LDB_CH0_MODE_MASK | LDB_CH1_MODE_MASK;
 			ch_val = reg & (LDB_CH0_MODE_MASK | LDB_CH1_MODE_MASK);
 		}
-
-		/* clock setting */
-		if ((cpu_is_mx6q() || cpu_is_mx6dl()) &&
-			((ldb->mode == LDB_SEP0) || (ldb->mode == LDB_SEP1)))
-			ldb_clk[6] += lvds_channel;
-		else
-			ldb_clk[6] += setting->disp_id;
-		ldb->setting[setting_idx].ldb_di_clk = clk_get(&ldb->pdev->dev,
-								ldb_clk);
-		if (IS_ERR(ldb->setting[setting_idx].ldb_di_clk)) {
-			dev_err(&ldb->pdev->dev, "get ldb clk0 failed\n");
-			iounmap(ldb->reg);
-			return PTR_ERR(ldb->setting[setting_idx].ldb_di_clk);
-		}
-		di_clk[3] += setting->dev_id;
-		di_clk[7] += setting->disp_id;
-		ldb->setting[setting_idx].di_clk = clk_get(&ldb->pdev->dev,
-								di_clk);
-		if (IS_ERR(ldb->setting[setting_idx].di_clk)) {
-			dev_err(&ldb->pdev->dev, "get di clk0 failed\n");
-			iounmap(ldb->reg);
-			return PTR_ERR(ldb->setting[setting_idx].di_clk);
-		}
-
-		dev_dbg(&ldb->pdev->dev, "ldb_clk to di clk: %s -> %s\n", ldb_clk, di_clk);
-
-		/* fb notifier for clk setting */
-		ldb->nb.notifier_call = ldb_fb_event,
-		ret = fb_register_client(&ldb->nb);
-		if (ret < 0) {
-			iounmap(ldb->reg);
-			return ret;
-		}
-
-		ldb->inited = true;
 	} else { /* second time for separate mode */
-		char di_clk[] = "ipu1_di0_clk";
-		char ldb_clk[] = "ldb_di0_clk";
-		int lvds_channel;
-
 		if ((ldb->mode == LDB_SPL_DI0) ||
 			(ldb->mode == LDB_SPL_DI1) ||
 			(ldb->mode == LDB_DUL_DI0) ||
@@ -653,7 +713,7 @@ static int ldb_disp_init(struct mxc_dispdrv_handle *disp,
 		}
 
 		setting_idx = 1;
-		if (cpu_is_mx6q() || cpu_is_mx6dl()) {
+		if (is_imx6_ldb(plat_data)) {
 			setting->dev_id = plat_data->sec_ipu_id;
 			setting->disp_id = plat_data->sec_disp_id;
 		} else {
@@ -697,42 +757,62 @@ static int ldb_disp_init(struct mxc_dispdrv_handle *disp,
 				reg |= LDB_DATA_WIDTH_CH1_18;
 		}
 		writel(reg, ldb->control_reg);
+	}
 
-		/* clock setting */
-		if (cpu_is_mx6q() || cpu_is_mx6dl())
-			ldb_clk[6] += lvds_channel;
-		else
-			ldb_clk[6] += setting->disp_id;
-		ldb->setting[setting_idx].ldb_di_clk = clk_get(&ldb->pdev->dev,
-								ldb_clk);
-		if (IS_ERR(ldb->setting[setting_idx].ldb_di_clk)) {
-			dev_err(&ldb->pdev->dev, "get ldb clk1 failed\n");
-			return PTR_ERR(ldb->setting[setting_idx].ldb_di_clk);
-		}
-		di_clk[3] += setting->dev_id;
-		di_clk[7] += setting->disp_id;
-		ldb->setting[setting_idx].di_clk = clk_get(&ldb->pdev->dev,
-								di_clk);
-		if (IS_ERR(ldb->setting[setting_idx].di_clk)) {
-			dev_err(&ldb->pdev->dev, "get di clk1 failed\n");
-			return PTR_ERR(ldb->setting[setting_idx].di_clk);
-		}
+	/* get clocks */
+	if (is_imx6_ldb(plat_data) &&
+		((ldb->mode == LDB_SEP0) || (ldb->mode == LDB_SEP1))) {
+		ldb_clk[6] += lvds_channel;
+		div_3_5_clk[2] += lvds_channel;
+		div_7_clk[2] += lvds_channel;
+		div_sel_clk[2] += lvds_channel;
+	} else {
+		ldb_clk[6] += setting->disp_id;
+		div_3_5_clk[2] += setting->disp_id;
+		div_7_clk[2] += setting->disp_id;
+		div_sel_clk[2] += setting->disp_id;
+	}
+	ldb->setting[setting_idx].ldb_di_clk = clk_get(&ldb->pdev->dev,
+							ldb_clk);
+	if (IS_ERR(ldb->setting[setting_idx].ldb_di_clk)) {
+		dev_err(&ldb->pdev->dev, "get ldb clk failed\n");
+		return PTR_ERR(ldb->setting[setting_idx].ldb_di_clk);
+	}
 
-		dev_dbg(&ldb->pdev->dev, "ldb_clk to di clk: %s -> %s\n", ldb_clk, di_clk);
+	ldb->setting[setting_idx].div_3_5_clk = clk_get(&ldb->pdev->dev,
+							div_3_5_clk);
+	if (IS_ERR(ldb->setting[setting_idx].div_3_5_clk)) {
+		dev_err(&ldb->pdev->dev, "get div 3.5 clk failed\n");
+		return PTR_ERR(ldb->setting[setting_idx].div_3_5_clk);
+	}
+	ldb->setting[setting_idx].div_7_clk = clk_get(&ldb->pdev->dev,
+							div_7_clk);
+	if (IS_ERR(ldb->setting[setting_idx].div_7_clk)) {
+		dev_err(&ldb->pdev->dev, "get div 7 clk failed\n");
+		return PTR_ERR(ldb->setting[setting_idx].div_7_clk);
+	}
+
+	ldb->setting[setting_idx].div_sel_clk = clk_get(&ldb->pdev->dev,
+							div_sel_clk);
+	if (IS_ERR(ldb->setting[setting_idx].div_sel_clk)) {
+		dev_err(&ldb->pdev->dev, "get div sel clk failed\n");
+		return PTR_ERR(ldb->setting[setting_idx].div_sel_clk);
+	}
+
+	di_clk[3] += setting->dev_id;
+	di_clk[7] += setting->disp_id;
+	ldb->setting[setting_idx].di_clk = clk_get(&ldb->pdev->dev,
+							di_clk);
+	if (IS_ERR(ldb->setting[setting_idx].di_clk)) {
+		dev_err(&ldb->pdev->dev, "get di clk failed\n");
+		return PTR_ERR(ldb->setting[setting_idx].di_clk);
 	}
 
 	ldb->setting[setting_idx].ch_mask = ch_mask;
 	ldb->setting[setting_idx].ch_val = ch_val;
 
-	if (cpu_is_mx6q() || cpu_is_mx6dl())
+	if (is_imx6_ldb(plat_data))
 		ldb_ipu_ldb_route(setting->dev_id, setting->disp_id, ldb);
-
-	/*
-	 * ldb_di0_clk -> ipux_di0_clk
-	 * ldb_di1_clk -> ipux_di1_clk
-	 */
-	clk_set_parent(ldb->setting[setting_idx].di_clk,
-			ldb->setting[setting_idx].ldb_di_clk);
 
 	/* must use spec video mode defined by driver */
 	ret = fb_find_mode(&setting->fbi->var, setting->fbi, setting->dft_mode_str,
@@ -751,11 +831,54 @@ static int ldb_disp_init(struct mxc_dispdrv_handle *disp,
 		}
 	}
 
-	/* save current ldb setting for fb notifier */
-	ldb->setting[setting_idx].active = true;
 	ldb->setting[setting_idx].ipu = setting->dev_id;
 	ldb->setting[setting_idx].di = setting->disp_id;
 
+	return ret;
+}
+
+static int ldb_post_disp_init(struct mxc_dispdrv_handle *disp,
+				int ipu_id, int disp_id)
+{
+	struct ldb_data *ldb = mxc_dispdrv_getdata(disp);
+	int setting_idx = ldb->inited ? 1 : 0;
+	int ret = 0;
+
+	if (!ldb->inited) {
+		ldb->nb.notifier_call = ldb_fb_event;
+		fb_register_client(&ldb->nb);
+	}
+
+	ret = clk_set_parent(ldb->setting[setting_idx].di_clk,
+			ldb->setting[setting_idx].ldb_di_clk);
+	if (ret) {
+		dev_err(&ldb->pdev->dev, "fail to set ldb_di clk as"
+			"the parent of ipu_di clk\n");
+		return ret;
+	}
+
+	if ((ldb->mode == LDB_SPL_DI0) || (ldb->mode == LDB_SPL_DI1)) {
+		ret = clk_set_parent(ldb->setting[setting_idx].div_sel_clk,
+				ldb->setting[setting_idx].div_3_5_clk);
+		if (ret) {
+			dev_err(&ldb->pdev->dev, "fail to set div 3.5 clk as"
+				"the parent of div sel clk\n");
+			return ret;
+		}
+	} else {
+		ret = clk_set_parent(ldb->setting[setting_idx].div_sel_clk,
+				ldb->setting[setting_idx].div_7_clk);
+		if (ret) {
+			dev_err(&ldb->pdev->dev, "fail to set div 7 clk as"
+				"the parent of div sel clk\n");
+			return ret;
+		}
+	}
+
+	/* save active ldb setting for fb notifier */
+	ldb->setting[setting_idx].active = true;
+
+	ldb->inited = true;
 	return ret;
 }
 
@@ -769,16 +892,18 @@ static void ldb_disp_deinit(struct mxc_dispdrv_handle *disp)
 	for (i = 0; i < 2; i++) {
 		clk_disable(ldb->setting[i].ldb_di_clk);
 		clk_put(ldb->setting[i].ldb_di_clk);
+		clk_put(ldb->setting[i].div_3_5_clk);
+		clk_put(ldb->setting[i].div_7_clk);
+		clk_put(ldb->setting[i].div_sel_clk);
 	}
 
 	fb_unregister_client(&ldb->nb);
-
-	iounmap(ldb->reg);
 }
 
 static struct mxc_dispdrv_driver ldb_drv = {
 	.name 	= DISPDRV_LDB,
 	.init 	= ldb_disp_init,
+	.post_init = ldb_post_disp_init,
 	.deinit	= ldb_disp_deinit,
 	.setup = ldb_disp_setup,
 };
@@ -808,6 +933,21 @@ static int ldb_resume(struct platform_device *pdev)
 
 	return 0;
 }
+
+static struct platform_device_id imx_ldb_devtype[] = {
+	{
+		.name = "ldb-imx6",
+		.driver_data = LDB_IMX6,
+	}, {
+		/* sentinel */
+	}
+};
+
+static const struct of_device_id imx_ldb_dt_ids[] = {
+	{ .compatible = "fsl,imx6q-ldb", .data = &imx_ldb_devtype[IMX6_LDB],},
+	{ /* sentinel */ }
+};
+
 /*!
  * This function is called by the driver framework to initialize the LDB
  * device.
@@ -821,11 +961,29 @@ static int ldb_probe(struct platform_device *pdev)
 {
 	int ret = 0;
 	struct ldb_data *ldb;
+	struct fsl_mxc_ldb_platform_data *plat_data;
+	const struct of_device_id *of_id =
+			of_match_device(imx_ldb_dt_ids, &pdev->dev);
 
-	ldb = kzalloc(sizeof(struct ldb_data), GFP_KERNEL);
-	if (!ldb) {
-		ret = -ENOMEM;
-		goto alloc_failed;
+	dev_dbg(&pdev->dev, "%s enter\n", __func__);
+	ldb = devm_kzalloc(&pdev->dev, sizeof(struct ldb_data), GFP_KERNEL);
+	if (!ldb)
+		return -ENOMEM;
+
+	plat_data = devm_kzalloc(&pdev->dev,
+				sizeof(struct fsl_mxc_ldb_platform_data),
+				GFP_KERNEL);
+	if (!plat_data)
+		return -ENOMEM;
+	pdev->dev.platform_data = plat_data;
+	if (of_id)
+		pdev->id_entry = of_id->data;
+	plat_data->devtype = pdev->id_entry->driver_data;
+
+	ret = ldb_get_of_property(pdev, plat_data);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "get ldb of property fail\n");
+		return ret;
 	}
 
 	ldb->pdev = pdev;
@@ -834,7 +992,7 @@ static int ldb_probe(struct platform_device *pdev)
 
 	dev_set_drvdata(&pdev->dev, ldb);
 
-alloc_failed:
+	dev_dbg(&pdev->dev, "%s exit\n", __func__);
 	return ret;
 }
 
@@ -846,14 +1004,14 @@ static int ldb_remove(struct platform_device *pdev)
 		return 0;
 	mxc_dispdrv_puthandle(ldb->disp_ldb);
 	mxc_dispdrv_unregister(ldb->disp_ldb);
-	kfree(ldb);
 	return 0;
 }
 
 static struct platform_driver mxcldb_driver = {
 	.driver = {
-		   .name = "mxc_ldb",
-		   },
+		.name = "mxc_ldb",
+		.of_match_table	= imx_ldb_dt_ids,
+	},
 	.probe = ldb_probe,
 	.remove = ldb_remove,
 	.suspend = ldb_suspend,

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -27,8 +27,9 @@
 #include <linux/irq.h>
 #include <linux/mutex.h>
 #include <linux/delay.h>
+#include <linux/of.h>
+#include <linux/regulator/consumer.h>
 #include <linux/isl29023.h>
-#include <linux/fsl_devices.h>
 
 #define ISL29023_DRV_NAME	"isl29023"
 #define DRIVER_VERSION		"1.0"
@@ -56,6 +57,7 @@
 
 #define ISL29023_NUM_CACHABLE_REGS	8
 #define DEF_RANGE			2
+#define DEFAULT_REGISTOR_VAL		499
 
 struct isl29023_data {
 	struct i2c_client *client;
@@ -850,14 +852,29 @@ static irqreturn_t isl29023_irq_handler(int irq, void *handle)
  * I2C layer
  */
 
-static int __devinit isl29023_probe(struct i2c_client *client,
+static int isl29023_probe(struct i2c_client *client,
 				    const struct i2c_device_id *id)
 {
 	struct i2c_adapter *adapter = to_i2c_adapter(client->dev.parent);
 	struct isl29023_data *data;
-	struct fsl_mxc_lightsensor_platform_data *ls_data;
 	struct input_dev *input_dev;
 	int err = 0;
+	struct regulator *vdd = NULL;
+	u32 rext = 0;
+	struct device_node *of_node = client->dev.of_node;
+
+	vdd = devm_regulator_get(&client->dev, "vdd");
+	if (!IS_ERR(vdd)) {
+		err  = regulator_enable(vdd);
+		if (err) {
+			dev_err(&client->dev, "vdd set voltage error\n");
+			return err;
+		}
+	}
+
+	err = of_property_read_u32(of_node, "rext", &rext);
+	if (err)
+		rext = DEFAULT_REGISTOR_VAL;
 
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE))
 		return -EIO;
@@ -866,11 +883,8 @@ static int __devinit isl29023_probe(struct i2c_client *client,
 	if (!data)
 		return -ENOMEM;
 
-	ls_data = (struct fsl_mxc_lightsensor_platform_data *)
-	    (client->dev).platform_data;
-
 	data->client = client;
-	data->rext = ls_data->rext;
+	data->rext = (u16)rext;
 	snprintf(data->phys, sizeof(data->phys),
 		 "%s", dev_name(&client->dev));
 	i2c_set_clientdata(client, data);
@@ -935,7 +949,7 @@ exit_kfree:
 	return err;
 }
 
-static int __devexit isl29023_remove(struct i2c_client *client)
+static int isl29023_remove(struct i2c_client *client)
 {
 	struct isl29023_data *data = i2c_get_clientdata(client);
 
@@ -992,7 +1006,7 @@ static struct i2c_driver isl29023_driver = {
 	.suspend = isl29023_suspend,
 	.resume	= isl29023_resume,
 	.probe	= isl29023_probe,
-	.remove	= __devexit_p(isl29023_remove),
+	.remove	= isl29023_remove,
 	.id_table = isl29023_id,
 };
 

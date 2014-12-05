@@ -33,7 +33,7 @@
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/initval.h>
-#include <mach/hardware.h>
+// #include <mach/hardware.h>
 
 #include <sound/tlv.h>
 
@@ -126,7 +126,7 @@ static unsigned int ac97_read(struct snd_soc_codec *codec, unsigned int reg)
         if (reg == AC97_RESET || reg == AC97_GPIO_STATUS ||
                 reg == AC97_VENDOR_ID1 || reg == AC97_VENDOR_ID2 ||
                 reg == AC97_REC_GAIN) {
-                return soc_ac97_ops.read(codec->ac97, reg);
+                return soc_ac97_ops->read(codec->ac97, reg);
         } else {
                 reg = reg >> 1;
 
@@ -142,7 +142,7 @@ static int ac97_write(struct snd_soc_codec *codec, unsigned int reg, unsigned in
         u16 *cache = codec->reg_cache;
 
         if (reg < 0x7c)
-                soc_ac97_ops.write(codec->ac97, reg, val);
+                soc_ac97_ops->write(codec->ac97, reg, val);
         reg = reg >> 1;
         if (reg < (ARRAY_SIZE(vt1613_ac97_reg)))
                 cache[reg] = val;
@@ -683,7 +683,7 @@ static int vt1613_hw_params(struct snd_pcm_substream *substream,
         }
         vt1613->configured = 1;
         vt1613->rate = params_rate(params);
-
+printk("vt1613_hw_params 0\n");
         return 0;
 }
 
@@ -829,7 +829,7 @@ struct snd_soc_dai_driver vt1613_dai[] = {
 },
 };
 
-static int vt1613_volatile_register(unsigned int reg)
+static int vt1613_volatile_register(struct snd_soc_codec *codec, unsigned int reg)
 {
 	if (reg == VT1613_CHIP_ID ||
 	    reg == VT1613_CHIP_ADCDAC_CTRL ||
@@ -838,7 +838,8 @@ static int vt1613_volatile_register(unsigned int reg)
 	return 0;
 }
 
-static int vt1613_suspend(struct snd_soc_codec *codec, pm_message_t state)
+// static int vt1613_suspend(struct snd_soc_codec *codec, pm_message_t state)
+static int vt1613_suspend(struct snd_soc_codec *codec)
 {
 	vt1613_set_bias_level(codec, SND_SOC_BIAS_OFF);
 
@@ -881,17 +882,15 @@ static int vt1613_resume(struct snd_soc_codec *codec)
 static int vt1613_driver_probe(struct snd_soc_codec *codec)
 {
 	struct vt1613_priv *vt1613 = snd_soc_codec_get_drvdata(codec);
-	u16 reg, ana_pwr, lreg_ctrl;
-	int vag;
 	int ret;
 	int i;
 
-	ret = snd_soc_new_ac97_codec(codec, &soc_ac97_ops, 0);
+	ret = snd_soc_new_ac97_codec(codec, soc_ac97_ops, 0);
 
-	soc_ac97_ops.reset(codec->ac97);
+	soc_ac97_ops->reset(codec->ac97);
         msleep(20);
-	soc_ac97_ops.warm_reset(codec->ac97);
-        msleep(20);
+//	soc_ac97_ops->warm_reset(codec->ac97);
+//        msleep(20);
 
 	vt1613_init_chip(codec);
 
@@ -904,7 +903,7 @@ static int vt1613_driver_probe(struct snd_soc_codec *codec)
 	snd_soc_write(codec, 0x5A, 0x0400); // <-- [gp000q7] Noise reducing during mic recording on vt1613
 	vt1613->sysclk = VT1613_APLL_RATE_48000;
 	
-	snd_soc_add_controls(codec, vt1613_snd_controls, ARRAY_SIZE(vt1613_snd_controls));
+	snd_soc_add_codec_controls(codec, vt1613_snd_controls, ARRAY_SIZE(vt1613_snd_controls));
         msleep(10);
 /*
 for (i = 0; i < ARRAY_SIZE(vt1613_ac97_reg); i++)
@@ -939,7 +938,7 @@ struct snd_soc_codec_driver vt1613_driver = {
 	.volatile_register = vt1613_volatile_register,
 };
 
-static __devinit int vt1613_codec_probe(struct platform_device *client)
+static int vt1613_codec_probe(struct platform_device *client)
 {
 	struct vt1613_priv *vt1613;
 	int ret;
@@ -963,7 +962,7 @@ static __devinit int vt1613_codec_probe(struct platform_device *client)
 	return 0;
 }
 
-static __devexit int vt1613_remove(struct platform_device *pdev)
+static int vt1613_remove(struct platform_device *pdev)
 {
 	struct vt1613_priv *vt1613 = platform_get_drvdata(pdev);
 
@@ -975,13 +974,20 @@ static __devexit int vt1613_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static const struct of_device_id vt1613_of_match[] = {
+	{ .compatible = "wlf,vt1613", },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, vt1613_of_match);
+
 static struct platform_driver vt1613_codec_driver = {
 	.driver = {
 		   .name = "vt1613-ac97",
 		   .owner = THIS_MODULE,
+		   .of_match_table = vt1613_of_match,
 	},
 	.probe = vt1613_codec_probe,
-	.remove = __devexit_p(vt1613_remove),
+	.remove = vt1613_remove,
 };
 
 static int __init vt1613_modinit(void)

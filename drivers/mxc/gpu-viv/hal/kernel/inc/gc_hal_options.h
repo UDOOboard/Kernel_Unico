@@ -114,6 +114,30 @@
 #define COMMAND_PROCESSOR_VERSION               1
 
 /*
+    gcdDUMP_KEY
+
+        Set this to a string that appears in 'cat /proc/<pid>/cmdline'. E.g. 'camera'.
+        HAL will create dumps for the processes matching this key.
+*/
+#ifndef gcdDUMP_KEY
+#   define gcdDUMP_KEY                          "process"
+#endif
+
+/*
+    gcdDUMP_PATH
+
+        The dump file location. Some processes cannot write to the sdcard.
+        Try apps' data dir, e.g. /data/data/com.android.launcher
+*/
+#ifndef gcdDUMP_PATH
+#if defined(ANDROID)
+#   define gcdDUMP_PATH                         "/mnt/sdcard/"
+#else
+#   define gcdDUMP_PATH                         "./"
+#endif
+#endif
+
+/*
     gcdDUMP
 
         When set to 1, a dump of all states and memory uploads, as well as other
@@ -342,6 +366,17 @@
 #endif
 
 /*
+    gcdUSER_HEAP_ALLOCATOR
+
+        Set to 1 to enable user mode heap allocator for fast memory allocation
+        and destroying. Otherwise, memory allocation/destroying in user mode
+        will be directly managed by system. Only for linux for now.
+*/
+#ifndef gcdUSER_HEAP_ALLOCATOR
+#   define gcdUSER_HEAP_ALLOCATOR               1
+#endif
+
+/*
     gcdHEAP_SIZE
 
         Set the allocation size for the internal heaps.  Each time a heap is
@@ -353,15 +388,6 @@
 */
 #ifndef gcdHEAP_SIZE
 #   define gcdHEAP_SIZE                         (64 << 10)
-#endif
-
-/*
-    gcdPOWER_MANAGEMENT
-
-        This define enables the power management code.
-*/
-#ifndef gcdPOWER_MANAGEMENT
-#   define gcdPOWER_MANAGEMENT                  1
 #endif
 
 /*
@@ -393,7 +419,7 @@
         If the value is 0, no timeout will be checked for.
 */
 #ifndef gcdGPU_TIMEOUT
-#   if gcdFPGA_BUILD
+#if gcdFPGA_BUILD
 #       define gcdGPU_TIMEOUT                   0
 #   else
 #       define gcdGPU_TIMEOUT                   20000
@@ -691,28 +717,10 @@
 
         Support swap with a specific rectangle.
 
-        Set the rectangle with eglSetSwapRectangleANDROID api.
+        Set the rectangle with eglSetSwapRectangleVIV api.
 */
 #ifndef gcdSUPPORT_SWAP_RECTANGLE
 #   define gcdSUPPORT_SWAP_RECTANGLE            0
-#endif
-
-/*
-    gcdDEFER_RESOLVES
-
-        Support deferred resolves for 3D apps.
-*/
-#ifndef gcdDEFER_RESOLVES
-#   define gcdDEFER_RESOLVES                    0
-#endif
-
-/*
-    gcdCOPYBLT_OPTIMIZATION
-
-        Combine dirty areas resulting from Android's copyBlt.
-*/
-#ifndef gcdCOPYBLT_OPTIMIZATION
-#   define gcdCOPYBLT_OPTIMIZATION              0
 #endif
 
 /*

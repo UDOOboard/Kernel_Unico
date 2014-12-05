@@ -1,7 +1,7 @@
 /*
  * Freescale GPMI NAND Flash Driver
  *
- * Copyright (C) 2010-2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2010-2011 Freescale Semiconductor, Inc.
  * Copyright (C) 2008 Embedded Alley Solutions, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -20,16 +20,17 @@
 #include <linux/mtd/nand.h>
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
-#include <linux/mxs-dma.h>
+#include <linux/dmaengine.h>
 
+#define GPMI_CLK_MAX 5 /* MX6Q needs five clocks */
 struct resources {
-	void          *gpmi_regs;
-	void          *bch_regs;
+	void __iomem  *gpmi_regs;
+	void __iomem  *bch_regs;
 	unsigned int  bch_low_interrupt;
 	unsigned int  bch_high_interrupt;
 	unsigned int  dma_low_channel;
 	unsigned int  dma_high_channel;
-	struct clk    *clock;
+	struct clk    *clock[GPMI_CLK_MAX];
 };
 
 /**
@@ -120,19 +121,22 @@ struct nand_timing {
 	int8_t  tRHOH_in_ns;
 };
 
-#define ASYNC_EDO_ENABLED		1
-#define ASYNC_EDO_TIMING_CONFIGED	2
 struct gpmi_nand_data {
+	/* flags */
+#define GPMI_ASYNC_EDO_ENABLED	(1 << 0)
+#define GPMI_TIMING_INIT_OK	(1 << 1)
+	int			flags;
+
 	/* System Interface */
 	struct device		*dev;
 	struct platform_device	*pdev;
-	struct gpmi_nand_platform_data	*pdata;
 
 	/* Resources */
 	struct resources	resources;
 
 	/* Flash Hardware */
 	struct nand_timing	timing;
+	int			timing_mode;
 
 	/* BCH */
 	struct bch_geometry	bch_geometry;
@@ -176,15 +180,12 @@ struct gpmi_nand_data {
 	/* DMA channels */
 #define DMA_CHANS		8
 	struct dma_chan		*dma_chans[DMA_CHANS];
-	struct mxs_dma_data	dma_data;
 	enum dma_ops_type	last_dma_type;
 	enum dma_ops_type	dma_type;
 	struct completion	dma_done;
 
 	/* private */
 	void			*private;
-	int flags;
-	int timing_mode;
 };
 
 /**
@@ -201,15 +202,16 @@ struct gpmi_nand_data {
  * @wrn_dly_sel:               The delay on the GPMI write strobe.
  */
 struct gpmi_nfc_hardware_timing {
-	/* for GPMI_HW_GPMI_TIMING0 */
+	/* for HW_GPMI_TIMING0 */
 	uint8_t  data_setup_in_cycles;
 	uint8_t  data_hold_in_cycles;
 	uint8_t  address_setup_in_cycles;
 
-	/* for GPMI_HW_GPMI_TIMING1 */
+	/* for HW_GPMI_TIMING1 */
 	uint16_t device_busy_timeout;
+#define GPMI_DEFAULT_BUSY_TIMEOUT	0x500 /* default busy timeout value.*/
 
-	/* for GPMI_HW_GPMI_CTRL1 */
+	/* for HW_GPMI_CTRL1 */
 	bool     use_half_periods;
 	uint8_t  sample_delay_factor;
 	uint8_t  wrn_dly_sel;
@@ -250,8 +252,6 @@ struct timing_threshod {
 };
 
 /* Common Services */
-extern bool is_ddr_nand(struct gpmi_nand_data *);
-extern bool is_board_support_ddr(struct gpmi_nand_data *);
 extern int common_nfc_set_geometry(struct gpmi_nand_data *);
 extern struct dma_chan *get_dma_chan(struct gpmi_nand_data *);
 extern void prepare_data_dma(struct gpmi_nand_data *,
@@ -262,8 +262,8 @@ extern int start_dma_with_bch_irq(struct gpmi_nand_data *,
 				struct dma_async_tx_descriptor *);
 
 /* GPMI-NAND helper function library */
-extern int extra_init(struct gpmi_nand_data *);
 extern int gpmi_init(struct gpmi_nand_data *);
+extern int gpmi_extra_init(struct gpmi_nand_data *);
 extern void gpmi_clear_bch(struct gpmi_nand_data *);
 extern void gpmi_dump_info(struct gpmi_nand_data *);
 extern int bch_set_geometry(struct gpmi_nand_data *);
@@ -283,13 +283,15 @@ extern int gpmi_read_page(struct gpmi_nand_data *,
 #define STATUS_ERASED		0xff
 #define STATUS_UNCORRECTABLE	0xfe
 
+/* BCH's bit correction capability. */
+#define MXS_ECC_STRENGTH_MAX	20	/* mx23 and mx28 */
+#define MX6_ECC_STRENGTH_MAX	40
+
 /* Use the platform_id to distinguish different Archs. */
-#define IS_MX23			0x1
-#define IS_MX28			0x2
-#define IS_MX6Q			0x8
+#define IS_MX23			0x0
+#define IS_MX28			0x1
+#define IS_MX6Q			0x2
 #define GPMI_IS_MX23(x)		((x)->pdev->id_entry->driver_data == IS_MX23)
 #define GPMI_IS_MX28(x)		((x)->pdev->id_entry->driver_data == IS_MX28)
 #define GPMI_IS_MX6Q(x)		((x)->pdev->id_entry->driver_data == IS_MX6Q)
-
-extern struct clk *mxs_dma_clk;
 #endif

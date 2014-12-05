@@ -2,7 +2,7 @@
  * sabresd_battery.h - Maxim 8903 USB/Adapter Charger Driver
  *
  * Copyright (C) 2011 Samsung Electronics
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc.
  * Based on max8903_charger.h
  *
  * This program is free software; you can redistribute it and/or modify
@@ -38,10 +38,12 @@ struct max8903_pdata {
 	int flt;	/* Fault output */
 	int dcm;	/* Current-Limit Mode input (1: DC, 2: USB) */
 	int usus;	/* USB Suspend Input (1: suspended) */
-	int feature_flag;/*battery capacity feature(0:enable, 1:disable)*/
+	int feature_flag;/* battery capacity feature(0:enable, 1:disable) */
 
-    /* DCM wired to Logic High
-       Set this true when DCM pin connect to Logic high.*/
+	/*
+	 * DCM wired to Logic High Set this true when DCM pin connect to
+	 * Logic high.
+	 */
 	bool dcm_always_high;
 
 	/*

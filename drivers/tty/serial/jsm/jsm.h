@@ -57,9 +57,11 @@ enum {
 	DBG_CARR	= 0x10000,
 };
 
-#define jsm_printk(nlevel, klevel, pdev, fmt, args...)	\
-	if ((DBG_##nlevel & jsm_debug))			\
-	dev_printk(KERN_##klevel, pdev->dev, fmt, ## args)
+#define jsm_dbg(nlevel, pdev, fmt, ...)				\
+do {								\
+	if (DBG_##nlevel & jsm_debug)				\
+		dev_dbg(pdev->dev, fmt, ##__VA_ARGS__);		\
+} while (0)
 
 #define	MAXLINES	256
 #define MAXPORTS	8
@@ -88,7 +90,6 @@ enum {
 
 /* 4 extra for alignment play space */
 #define WRITEBUFLEN	((4096) + 4)
-#define MYFLIPLEN	N_TTY_BUF_SIZE
 
 #define JSM_VERSION	"jsm: 1.2-1-INKERNEL"
 #define JSM_PARTNUM	"40002438_A-INKERNEL"
@@ -150,7 +151,6 @@ struct jsm_board
 	u32		bd_uart_offset;	/* Space between each UART */
 
 	struct jsm_channel *channels[MAXPORTS]; /* array of pointers to our channels. */
-	char		*flipbuf;	/* Our flip buffer, alloced if board is found */
 
 	u32		bd_dividend;	/* Board/UARTs specific dividend */
 
@@ -177,7 +177,6 @@ struct jsm_board
 #define CH_TX_FIFO_LWM	0x0800		/* TX Fifo is below Low Water	*/
 #define CH_BREAK_SENDING 0x1000		/* Break is being sent		*/
 #define CH_LOOPBACK 0x2000		/* Channel is in lookback mode	*/
-#define CH_FLIPBUF_IN_USE 0x4000	/* Channel's flipbuf is in use	*/
 #define CH_BAUD0	0x08000		/* Used for checking B0 transitions */
 
 /* Our Read/Error/Write queue sizes */

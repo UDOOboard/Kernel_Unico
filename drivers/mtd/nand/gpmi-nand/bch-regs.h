@@ -1,7 +1,7 @@
 /*
  * Freescale GPMI NAND Flash Driver
  *
- * Copyright 2008-2012 Freescale Semiconductor, Inc.
+ * Copyright 2008-2011 Freescale Semiconductor, Inc.
  * Copyright 2008 Embedded Alley Solutions, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -61,6 +61,16 @@
 			& BM_BCH_FLASH0LAYOUT0_ECC0)		\
 	)
 
+#define MX6Q_BP_BCH_FLASH0LAYOUT0_GF_13_14	10
+#define MX6Q_BM_BCH_FLASH0LAYOUT0_GF_13_14			\
+				(0x1 << MX6Q_BP_BCH_FLASH0LAYOUT0_GF_13_14)
+#define BF_BCH_FLASH0LAYOUT0_GF(v, x)				\
+	((GPMI_IS_MX6Q(x) && ((v) == 14))			\
+		? (((1) << MX6Q_BP_BCH_FLASH0LAYOUT0_GF_13_14)	\
+			& MX6Q_BM_BCH_FLASH0LAYOUT0_GF_13_14)	\
+		: 0						\
+	)
+
 #define BP_BCH_FLASH0LAYOUT0_DATA0_SIZE		0
 #define BM_BCH_FLASH0LAYOUT0_DATA0_SIZE		\
 			(0xfff << BP_BCH_FLASH0LAYOUT0_DATA0_SIZE)
@@ -71,7 +81,6 @@
 		? (((v) >> 2) & MX6Q_BM_BCH_FLASH0LAYOUT0_DATA0_SIZE)	\
 		: ((v) & BM_BCH_FLASH0LAYOUT0_DATA0_SIZE)		\
 	)
-#define BM_BCH_FLASH0LAYOUT0_GF13_0_GF14_1 0x00000400
 
 #define HW_BCH_FLASH0LAYOUT1			0x00000090
 
@@ -94,6 +103,16 @@
 			& BM_BCH_FLASH0LAYOUT1_ECCN)		\
 	)
 
+#define MX6Q_BP_BCH_FLASH0LAYOUT1_GF_13_14	10
+#define MX6Q_BM_BCH_FLASH0LAYOUT1_GF_13_14			\
+				(0x1 << MX6Q_BP_BCH_FLASH0LAYOUT1_GF_13_14)
+#define BF_BCH_FLASH0LAYOUT1_GF(v, x)				\
+	((GPMI_IS_MX6Q(x) && ((v) == 14))			\
+		? (((1) << MX6Q_BP_BCH_FLASH0LAYOUT1_GF_13_14)	\
+			& MX6Q_BM_BCH_FLASH0LAYOUT1_GF_13_14)	\
+		: 0						\
+	)
+
 #define BP_BCH_FLASH0LAYOUT1_DATAN_SIZE		0
 #define BM_BCH_FLASH0LAYOUT1_DATAN_SIZE		\
 			(0xfff << BP_BCH_FLASH0LAYOUT1_DATAN_SIZE)
@@ -104,5 +123,6 @@
 		? (((v) >> 2) & MX6Q_BM_BCH_FLASH0LAYOUT1_DATAN_SIZE)	\
 		: ((v) & BM_BCH_FLASH0LAYOUT1_DATAN_SIZE)		\
 	)
-#define BM_BCH_FLASH0LAYOUT1_GF13_0_GF14_1 0x00000400
+
+#define HW_BCH_VERSION				0x00000160
 #endif

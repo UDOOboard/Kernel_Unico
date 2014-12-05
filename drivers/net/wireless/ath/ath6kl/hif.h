@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004-2011 Atheros Communications Inc.
+ * Copyright (c) 2011 Qualcomm Atheros, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -35,6 +36,7 @@
 #define MAX_SCATTER_REQ_TRANSFER_SIZE    (32 * 1024)
 
 #define MANUFACTURER_ID_AR6003_BASE        0x300
+#define MANUFACTURER_ID_AR6004_BASE        0x400
     /* SDIO manufacturer ID and Codes */
 #define MANUFACTURER_ID_ATH6KL_BASE_MASK     0xFF00
 #define MANUFACTURER_CODE                  0x271	/* Atheros */
@@ -58,6 +60,18 @@
 
 /* mode to enable special 4-bit interrupt assertion without clock */
 #define SDIO_IRQ_MODE_ASYNC_4BIT_IRQ   (1 << 0)
+
+/* HTC runs over mailbox 0 */
+#define HTC_MAILBOX	0
+
+#define ATH6KL_TARGET_DEBUG_INTR_MASK     0x01
+
+/* FIXME: are these duplicates with MAX_SCATTER_ values in hif.h? */
+#define ATH6KL_SCATTER_ENTRIES_PER_REQ            16
+#define ATH6KL_MAX_TRANSFER_SIZE_PER_SCATTER      (16 * 1024)
+#define ATH6KL_SCATTER_REQS                       4
+
+#define ATH6KL_HIF_COMMUNICATION_TIMEOUT	1000
 
 struct bus_request {
 	struct list_head list;
@@ -171,29 +185,50 @@ struct hif_scatter_req {
 	/* total length of entire transfer */
 	u32 len;
 
-	u32 flags;
-	void (*complete) (struct hif_scatter_req *);
+	bool virt_scat;
+
+	void (*complete) (struct htc_target *, struct hif_scatter_req *);
 	int status;
-	struct htc_endpoint *ep;
 	int scat_entries;
 
-	struct hif_scatter_req_priv *req_priv;
+	struct bus_request *busrequest;
+	struct scatterlist *sgentries;
 
 	/* bounce buffer for upper layers to copy to/from */
 	u8 *virt_dma_buf;
 
 	struct hif_scatter_item scat_list[1];
+
+	u32 scat_q_depth;
 };
 
-struct hif_dev_scat_sup_info {
-	int (*rw_scat_func) (struct ath6kl *ar, struct hif_scatter_req *);
-	int max_scat_entries;
-	int max_xfer_szper_scatreq;
-};
+struct ath6kl_irq_proc_registers {
+	u8 host_int_status;
+	u8 cpu_int_status;
+	u8 error_int_status;
+	u8 counter_int_status;
+	u8 mbox_frame;
+	u8 rx_lkahd_valid;
+	u8 host_int_status2;
+	u8 gmbox_rx_avail;
+	__le32 rx_lkahd[2];
+	__le32 rx_gmbox_lkahd_alias[2];
+} __packed;
 
-struct hif_scatter_req_priv {
-	struct bus_request *busrequest;
-	struct scatterlist sgentries[MAX_SCATTER_ENTRIES_PER_REQ];
+struct ath6kl_irq_enable_reg {
+	u8 int_status_en;
+	u8 cpu_int_status_en;
+	u8 err_int_status_en;
+	u8 cntr_int_status_en;
+} __packed;
+
+struct ath6kl_device {
+	/* protects irq_proc_reg and irq_en_reg below */
+	spinlock_t lock;
+	struct ath6kl_irq_proc_registers irq_proc_reg;
+	struct ath6kl_irq_enable_reg irq_en_reg;
+	struct htc_target *htc_cnxt;
+	struct ath6kl *ar;
 };
 
 struct ath6kl_hif_ops {
@@ -208,9 +243,40 @@ struct ath6kl_hif_ops {
 	struct hif_scatter_req *(*scatter_req_get)(struct ath6kl *ar);
 	void (*scatter_req_add)(struct ath6kl *ar,
 				struct hif_scatter_req *s_req);
-	int (*enable_scatter)(struct ath6kl *ar,
-			      struct hif_dev_scat_sup_info *info);
+	int (*enable_scatter)(struct ath6kl *ar);
+	int (*scat_req_rw) (struct ath6kl *ar,
+			    struct hif_scatter_req *scat_req);
 	void (*cleanup_scatter)(struct ath6kl *ar);
+	int (*suspend)(struct ath6kl *ar, struct cfg80211_wowlan *wow);
+	int (*resume)(struct ath6kl *ar);
+	int (*diag_read32)(struct ath6kl *ar, u32 address, u32 *value);
+	int (*diag_write32)(struct ath6kl *ar, u32 address, __le32 value);
+	int (*bmi_read)(struct ath6kl *ar, u8 *buf, u32 len);
+	int (*bmi_write)(struct ath6kl *ar, u8 *buf, u32 len);
+	int (*power_on)(struct ath6kl *ar);
+	int (*power_off)(struct ath6kl *ar);
+	void (*stop)(struct ath6kl *ar);
+	int (*pipe_send)(struct ath6kl *ar, u8 pipe, struct sk_buff *hdr_buf,
+			 struct sk_buff *buf);
+	void (*pipe_get_default)(struct ath6kl *ar, u8 *pipe_ul, u8 *pipe_dl);
+	int (*pipe_map_service)(struct ath6kl *ar, u16 service_id, u8 *pipe_ul,
+				u8 *pipe_dl);
+	u16 (*pipe_get_free_queue_number)(struct ath6kl *ar, u8 pipe);
 };
+
+int ath6kl_hif_setup(struct ath6kl_device *dev);
+int ath6kl_hif_unmask_intrs(struct ath6kl_device *dev);
+int ath6kl_hif_mask_intrs(struct ath6kl_device *dev);
+int ath6kl_hif_poll_mboxmsg_rx(struct ath6kl_device *dev,
+			       u32 *lk_ahd, int timeout);
+int ath6kl_hif_rx_control(struct ath6kl_device *dev, bool enable_rx);
+int ath6kl_hif_disable_intrs(struct ath6kl_device *dev);
+
+int ath6kl_hif_rw_comp_handler(void *context, int status);
+int ath6kl_hif_intr_bh_handler(struct ath6kl *ar);
+
+/* Scatter Function and Definitions */
+int ath6kl_hif_submit_scat_req(struct ath6kl_device *dev,
+			       struct hif_scatter_req *scat_req, bool read);
 
 #endif

@@ -1,6 +1,6 @@
 /* bpf_jit_comp.c : BPF JIT compiler
  *
- * Copyright (C) 2011 Eric Dumazet (eric.dumazet@gmail.com)
+ * Copyright (C) 2011-2013 Eric Dumazet (eric.dumazet@gmail.com)
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -11,6 +11,7 @@
 #include <asm/cacheflush.h>
 #include <linux/netdevice.h>
 #include <linux/filter.h>
+#include <linux/if_vlan.h>
 
 /*
  * Conventions :
@@ -30,7 +31,10 @@ int bpf_jit_enable __read_mostly;
  * assembly code in arch/x86/net/bpf_jit.S
  */
 extern u8 sk_load_word[], sk_load_half[], sk_load_byte[], sk_load_byte_msh[];
-extern u8 sk_load_word_ind[], sk_load_half_ind[], sk_load_byte_ind[];
+extern u8 sk_load_word_positive_offset[], sk_load_half_positive_offset[];
+extern u8 sk_load_byte_positive_offset[], sk_load_byte_msh_positive_offset[];
+extern u8 sk_load_word_negative_offset[], sk_load_half_negative_offset[];
+extern u8 sk_load_byte_negative_offset[], sk_load_byte_msh_negative_offset[];
 
 static inline u8 *emit_code(u8 *ptr, u32 bytes, unsigned int len)
 {
@@ -117,6 +121,28 @@ static inline void bpf_flush_icache(void *start, void *end)
 	set_fs(old_fs);
 }
 
+#define CHOOSE_LOAD_FUNC(K, func) \
+	((int)K < 0 ? ((int)K >= SKF_LL_OFF ? func##_negative_offset : func) : func##_positive_offset)
+
+/* Helper to find the offset of pkt_type in sk_buff
+ * We want to make sure its still a 3bit field starting at a byte boundary.
+ */
+#define PKT_TYPE_MAX 7
+static int pkt_type_offset(void)
+{
+	struct sk_buff skb_probe = {
+		.pkt_type = ~0,
+	};
+	char *ct = (char *)&skb_probe;
+	unsigned int off;
+
+	for (off = 0; off < sizeof(struct sk_buff); off++) {
+		if (ct[off] == PKT_TYPE_MAX)
+			return off;
+	}
+	pr_err_once("Please fix pkt_type_offset(), as pkt_type couldn't be found\n");
+	return -1;
+}
 
 void bpf_jit_compile(struct sk_filter *fp)
 {
@@ -207,7 +233,10 @@ void bpf_jit_compile(struct sk_filter *fp)
 		case BPF_S_ANC_MARK:
 		case BPF_S_ANC_RXHASH:
 		case BPF_S_ANC_CPU:
+		case BPF_S_ANC_VLAN_TAG:
+		case BPF_S_ANC_VLAN_TAG_PRESENT:
 		case BPF_S_ANC_QUEUE:
+		case BPF_S_ANC_PKTTYPE:
 		case BPF_S_LD_W_ABS:
 		case BPF_S_LD_H_ABS:
 		case BPF_S_LD_B_ABS:
@@ -275,6 +304,31 @@ void bpf_jit_compile(struct sk_filter *fp)
 				}
 				EMIT4(0x31, 0xd2, 0xf7, 0xf3); /* xor %edx,%edx; div %ebx */
 				break;
+			case BPF_S_ALU_MOD_X: /* A %= X; */
+				seen |= SEEN_XREG;
+				EMIT2(0x85, 0xdb);	/* test %ebx,%ebx */
+				if (pc_ret0 > 0) {
+					/* addrs[pc_ret0 - 1] is start address of target
+					 * (addrs[i] - 6) is the address following this jmp
+					 * ("xor %edx,%edx; div %ebx;mov %edx,%eax" being 6 bytes long)
+					 */
+					EMIT_COND_JMP(X86_JE, addrs[pc_ret0 - 1] -
+								(addrs[i] - 6));
+				} else {
+					EMIT_COND_JMP(X86_JNE, 2 + 5);
+					CLEAR_A();
+					EMIT1_off32(0xe9, cleanup_addr - (addrs[i] - 6)); /* jmp .+off32 */
+				}
+				EMIT2(0x31, 0xd2);	/* xor %edx,%edx */
+				EMIT2(0xf7, 0xf3);	/* div %ebx */
+				EMIT2(0x89, 0xd0);	/* mov %edx,%eax */
+				break;
+			case BPF_S_ALU_MOD_K: /* A %= K; */
+				EMIT2(0x31, 0xd2);	/* xor %edx,%edx */
+				EMIT1(0xb9);EMIT(K, 4);	/* mov imm32,%ecx */
+				EMIT2(0xf7, 0xf1);	/* div %ecx */
+				EMIT2(0x89, 0xd0);	/* mov %edx,%eax */
+				break;
 			case BPF_S_ALU_DIV_K: /* A = reciprocal_divide(A, K); */
 				EMIT3(0x48, 0x69, 0xc0); /* imul imm32,%rax,%rax */
 				EMIT(K, 4);
@@ -303,6 +357,19 @@ void bpf_jit_compile(struct sk_filter *fp)
 					EMIT3(0x83, 0xc8, K); /* or imm8,%eax */
 				else
 					EMIT1_off32(0x0d, K);	/* or imm32,%eax */
+				break;
+			case BPF_S_ANC_ALU_XOR_X: /* A ^= X; */
+			case BPF_S_ALU_XOR_X:
+				seen |= SEEN_XREG;
+				EMIT2(0x31, 0xd8);		/* xor %ebx,%eax */
+				break;
+			case BPF_S_ALU_XOR_K: /* A ^= K; */
+				if (K == 0)
+					break;
+				if (is_imm8(K))
+					EMIT3(0x83, 0xf0, K);	/* xor imm8,%eax */
+				else
+					EMIT1_off32(0x35, K);	/* xor imm32,%eax */
 				break;
 			case BPF_S_ALU_LSH_X: /* A <<= X; */
 				seen |= SEEN_XREG;
@@ -472,45 +539,82 @@ void bpf_jit_compile(struct sk_filter *fp)
 				CLEAR_A();
 #endif
 				break;
-			case BPF_S_LD_W_ABS:
-				func = sk_load_word;
-common_load:			seen |= SEEN_DATAREF;
-				if ((int)K < 0) {
-					/* Abort the JIT because __load_pointer() is needed. */
-					goto out;
+			case BPF_S_ANC_VLAN_TAG:
+			case BPF_S_ANC_VLAN_TAG_PRESENT:
+				BUILD_BUG_ON(FIELD_SIZEOF(struct sk_buff, vlan_tci) != 2);
+				if (is_imm8(offsetof(struct sk_buff, vlan_tci))) {
+					/* movzwl off8(%rdi),%eax */
+					EMIT4(0x0f, 0xb7, 0x47, offsetof(struct sk_buff, vlan_tci));
+				} else {
+					EMIT3(0x0f, 0xb7, 0x87); /* movzwl off32(%rdi),%eax */
+					EMIT(offsetof(struct sk_buff, vlan_tci), 4);
 				}
+				BUILD_BUG_ON(VLAN_TAG_PRESENT != 0x1000);
+				if (filter[i].code == BPF_S_ANC_VLAN_TAG) {
+					EMIT3(0x80, 0xe4, 0xef); /* and    $0xef,%ah */
+				} else {
+					EMIT3(0xc1, 0xe8, 0x0c); /* shr    $0xc,%eax */
+					EMIT3(0x83, 0xe0, 0x01); /* and    $0x1,%eax */
+				}
+				break;
+			case BPF_S_ANC_PKTTYPE:
+			{
+				int off = pkt_type_offset();
+
+				if (off < 0)
+					goto out;
+				if (is_imm8(off)) {
+					/* movzbl off8(%rdi),%eax */
+					EMIT4(0x0f, 0xb6, 0x47, off);
+				} else {
+					/* movbl off32(%rdi),%eax */
+					EMIT3(0x0f, 0xb6, 0x87);
+					EMIT(off, 4);
+				}
+				EMIT3(0x83, 0xe0, PKT_TYPE_MAX); /* and    $0x7,%eax */
+				break;
+			}
+			case BPF_S_LD_W_ABS:
+				func = CHOOSE_LOAD_FUNC(K, sk_load_word);
+common_load:			seen |= SEEN_DATAREF;
 				t_offset = func - (image + addrs[i]);
 				EMIT1_off32(0xbe, K); /* mov imm32,%esi */
 				EMIT1_off32(0xe8, t_offset); /* call */
 				break;
 			case BPF_S_LD_H_ABS:
-				func = sk_load_half;
+				func = CHOOSE_LOAD_FUNC(K, sk_load_half);
 				goto common_load;
 			case BPF_S_LD_B_ABS:
-				func = sk_load_byte;
+				func = CHOOSE_LOAD_FUNC(K, sk_load_byte);
 				goto common_load;
 			case BPF_S_LDX_B_MSH:
-				if ((int)K < 0) {
-					/* Abort the JIT because __load_pointer() is needed. */
-					goto out;
-				}
+				func = CHOOSE_LOAD_FUNC(K, sk_load_byte_msh);
 				seen |= SEEN_DATAREF | SEEN_XREG;
-				t_offset = sk_load_byte_msh - (image + addrs[i]);
+				t_offset = func - (image + addrs[i]);
 				EMIT1_off32(0xbe, K);	/* mov imm32,%esi */
 				EMIT1_off32(0xe8, t_offset); /* call sk_load_byte_msh */
 				break;
 			case BPF_S_LD_W_IND:
-				func = sk_load_word_ind;
+				func = sk_load_word;
 common_load_ind:		seen |= SEEN_DATAREF | SEEN_XREG;
 				t_offset = func - (image + addrs[i]);
-				EMIT1_off32(0xbe, K);	/* mov imm32,%esi   */
+				if (K) {
+					if (is_imm8(K)) {
+						EMIT3(0x8d, 0x73, K); /* lea imm8(%rbx), %esi */
+					} else {
+						EMIT2(0x8d, 0xb3); /* lea imm32(%rbx),%esi */
+						EMIT(K, 4);
+					}
+				} else {
+					EMIT2(0x89,0xde); /* mov %ebx,%esi */
+				}
 				EMIT1_off32(0xe8, t_offset);	/* call sk_load_xxx_ind */
 				break;
 			case BPF_S_LD_H_IND:
-				func = sk_load_half_ind;
+				func = sk_load_half;
 				goto common_load_ind;
 			case BPF_S_LD_B_IND:
-				func = sk_load_byte_ind;
+				func = sk_load_byte;
 				goto common_load_ind;
 			case BPF_S_JMP_JA:
 				t_offset = addrs[i + K] - addrs[i];
@@ -621,17 +725,12 @@ cond_branch:			f_offset = addrs[i + filter[i].jf] - addrs[i];
 		}
 		oldproglen = proglen;
 	}
+
 	if (bpf_jit_enable > 1)
-		pr_err("flen=%d proglen=%u pass=%d image=%p\n",
-		       flen, proglen, pass, image);
+		bpf_jit_dump(flen, proglen, pass, image);
 
 	if (image) {
-		if (bpf_jit_enable > 1)
-			print_hex_dump(KERN_ERR, "JIT code: ", DUMP_PREFIX_ADDRESS,
-				       16, 1, image, proglen, false);
-
 		bpf_flush_icache(image, image + proglen);
-
 		fp->bpf_func = (void *)image;
 	}
 out:

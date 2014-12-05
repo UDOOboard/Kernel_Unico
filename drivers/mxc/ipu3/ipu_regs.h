@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2005-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2005-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -20,6 +20,12 @@
  */
 #ifndef __IPU_REGS_INCLUDED__
 #define __IPU_REGS_INCLUDED__
+
+enum imx_ipu_rev {
+	IPU_V3DEX = 2,
+	IPU_V3M,
+	IPU_V3H,
+};
 
 /*
  * hw_rev 2: IPUV3DEX

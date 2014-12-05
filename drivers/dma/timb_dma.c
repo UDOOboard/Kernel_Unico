@@ -31,6 +31,8 @@
 
 #include <linux/timb_dma.h>
 
+#include "dmaengine.h"
+
 #define DRIVER_NAME "timb-dma"
 
 /* Global DMA registers */
@@ -84,7 +86,6 @@ struct timb_dma_chan {
 					especially the lists and descriptors,
 					from races between the tasklet and calls
 					from above */
-	dma_cookie_t		last_completed_cookie;
 	bool			ongoing;
 	struct list_head	active_list;
 	struct list_head	queue;
@@ -166,10 +167,10 @@ static void __td_unmap_desc(struct timb_dma_chan *td_chan, const u8 *dma_desc,
 
 	if (single)
 		dma_unmap_single(chan2dev(&td_chan->chan), addr, len,
-			td_chan->direction);
+			DMA_TO_DEVICE);
 	else
 		dma_unmap_page(chan2dev(&td_chan->chan), addr, len,
-			td_chan->direction);
+			DMA_TO_DEVICE);
 }
 
 static void __td_unmap_descs(struct timb_dma_desc *td_desc, bool single)
@@ -284,7 +285,7 @@ static void __td_finish(struct timb_dma_chan *td_chan)
 	else
 		iowrite32(0, td_chan->membase + TIMBDMA_OFFS_TX_DLAR);
 */
-	td_chan->last_completed_cookie = txd->cookie;
+	dma_cookie_complete(txd);
 	td_chan->ongoing = false;
 
 	callback = txd->callback;
@@ -349,12 +350,7 @@ static dma_cookie_t td_tx_submit(struct dma_async_tx_descriptor *txd)
 	dma_cookie_t cookie;
 
 	spin_lock_bh(&td_chan->lock);
-
-	cookie = txd->chan->cookie;
-	if (++cookie < 0)
-		cookie = 1;
-	txd->chan->cookie = cookie;
-	txd->cookie = cookie;
+	cookie = dma_cookie_assign(txd);
 
 	if (list_empty(&td_chan->active_list)) {
 		dev_dbg(chan2dev(txd->chan), "%s: started %u\n", __func__,
@@ -398,7 +394,7 @@ static struct timb_dma_desc *td_alloc_init_desc(struct timb_dma_chan *td_chan)
 	td_desc->txd.flags = DMA_CTRL_ACK;
 
 	td_desc->txd.phys = dma_map_single(chan2dmadev(chan),
-		td_desc->desc_list, td_desc->desc_list_len, DMA_MEM_TO_DEV);
+		td_desc->desc_list, td_desc->desc_list_len, DMA_TO_DEVICE);
 
 	err = dma_mapping_error(chan2dmadev(chan), td_desc->txd.phys);
 	if (err) {
@@ -419,7 +415,7 @@ static void td_free_desc(struct timb_dma_desc *td_desc)
 {
 	dev_dbg(chan2dev(td_desc->txd.chan), "Freeing desc: %p\n", td_desc);
 	dma_unmap_single(chan2dmadev(td_desc->txd.chan), td_desc->txd.phys,
-		td_desc->desc_list_len, DMA_MEM_TO_DEV);
+		td_desc->desc_list_len, DMA_TO_DEVICE);
 
 	kfree(td_desc->desc_list);
 	kfree(td_desc);
@@ -481,8 +477,7 @@ static int td_alloc_chan_resources(struct dma_chan *chan)
 	}
 
 	spin_lock_bh(&td_chan->lock);
-	td_chan->last_completed_cookie = 1;
-	chan->cookie = 1;
+	dma_cookie_init(chan);
 	spin_unlock_bh(&td_chan->lock);
 
 	return 0;
@@ -515,24 +510,13 @@ static void td_free_chan_resources(struct dma_chan *chan)
 static enum dma_status td_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
 				    struct dma_tx_state *txstate)
 {
-	struct timb_dma_chan *td_chan =
-		container_of(chan, struct timb_dma_chan, chan);
-	dma_cookie_t		last_used;
-	dma_cookie_t		last_complete;
-	int			ret;
+	enum dma_status ret;
 
 	dev_dbg(chan2dev(chan), "%s: Entry\n", __func__);
 
-	last_complete = td_chan->last_completed_cookie;
-	last_used = chan->cookie;
+	ret = dma_cookie_status(chan, cookie, txstate);
 
-	ret = dma_async_is_complete(cookie, last_complete, last_used);
-
-	dma_set_tx_state(txstate, last_complete, last_used, 0);
-
-	dev_dbg(chan2dev(chan),
-		"%s: exit, ret: %d, last_complete: %d, last_used: %d\n",
-		__func__, ret, last_complete, last_used);
+	dev_dbg(chan2dev(chan), "%s: exit, ret: %d\n", 	__func__, ret);
 
 	return ret;
 }
@@ -558,7 +542,8 @@ static void td_issue_pending(struct dma_chan *chan)
 
 static struct dma_async_tx_descriptor *td_prep_slave_sg(struct dma_chan *chan,
 	struct scatterlist *sgl, unsigned int sg_len,
-	enum dma_transfer_direction direction, unsigned long flags)
+	enum dma_transfer_direction direction, unsigned long flags,
+	void *context)
 {
 	struct timb_dma_chan *td_chan =
 		container_of(chan, struct timb_dma_chan, chan);
@@ -682,7 +667,7 @@ static irqreturn_t td_irq(int irq, void *devid)
 }
 
 
-static int __devinit td_probe(struct platform_device *pdev)
+static int td_probe(struct platform_device *pdev)
 {
 	struct timb_dma_platform_data *pdata = pdev->dev.platform_data;
 	struct timb_dma *td;
@@ -753,7 +738,7 @@ static int __devinit td_probe(struct platform_device *pdev)
 
 	INIT_LIST_HEAD(&td->dma.channels);
 
-	for (i = 0; i < pdata->nr_channels; i++, td->dma.chancnt++) {
+	for (i = 0; i < pdata->nr_channels; i++) {
 		struct timb_dma_chan *td_chan = &td->channels[i];
 		struct timb_dma_platform_data_channel *pchan =
 			pdata->channels + i;
@@ -762,12 +747,11 @@ static int __devinit td_probe(struct platform_device *pdev)
 		if ((i % 2) == pchan->rx) {
 			dev_err(&pdev->dev, "Wrong channel configuration\n");
 			err = -EINVAL;
-			goto err_tasklet_kill;
+			goto err_free_irq;
 		}
 
 		td_chan->chan.device = &td->dma;
-		td_chan->chan.cookie = 1;
-		td_chan->chan.chan_id = i;
+		dma_cookie_init(&td_chan->chan);
 		spin_lock_init(&td_chan->lock);
 		INIT_LIST_HEAD(&td_chan->active_list);
 		INIT_LIST_HEAD(&td_chan->queue);
@@ -814,7 +798,7 @@ err_release_region:
 
 }
 
-static int __devexit td_remove(struct platform_device *pdev)
+static int td_remove(struct platform_device *pdev)
 {
 	struct timb_dma *td = platform_get_drvdata(pdev);
 	struct resource *iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -839,20 +823,10 @@ static struct platform_driver td_driver = {
 		.owner  = THIS_MODULE,
 	},
 	.probe	= td_probe,
-	.remove	= __exit_p(td_remove),
+	.remove	= td_remove,
 };
 
-static int __init td_init(void)
-{
-	return platform_driver_register(&td_driver);
-}
-module_init(td_init);
-
-static void __exit td_exit(void)
-{
-	platform_driver_unregister(&td_driver);
-}
-module_exit(td_exit);
+module_platform_driver(td_driver);
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Timberdale DMA controller driver");

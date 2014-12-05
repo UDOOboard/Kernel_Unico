@@ -61,7 +61,7 @@ int v9fs_file_open(struct inode *inode, struct file *file)
 	struct p9_fid *fid;
 	int omode;
 
-	P9_DPRINTK(P9_DEBUG_VFS, "inode: %p file: %p\n", inode, file);
+	p9_debug(P9_DEBUG_VFS, "inode: %p file: %p\n", inode, file);
 	v9inode = V9FS_I(inode);
 	v9ses = v9fs_inode2v9ses(inode);
 	if (v9fs_proto_dotl(v9ses))
@@ -79,10 +79,6 @@ int v9fs_file_open(struct inode *inode, struct file *file)
 		if (err < 0) {
 			p9_client_clunk(fid);
 			return err;
-		}
-		if (file->f_flags & O_TRUNC) {
-			i_size_write(inode, 0);
-			inode->i_blocks = 0;
 		}
 		if ((file->f_flags & O_APPEND) &&
 			(!v9fs_proto_dotu(v9ses) && !v9fs_proto_dotl(v9ses)))
@@ -133,9 +129,9 @@ out_error:
 static int v9fs_file_lock(struct file *filp, int cmd, struct file_lock *fl)
 {
 	int res = 0;
-	struct inode *inode = filp->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(filp);
 
-	P9_DPRINTK(P9_DEBUG_VFS, "filp: %p lock: %p\n", filp, fl);
+	p9_debug(P9_DEBUG_VFS, "filp: %p lock: %p\n", filp, fl);
 
 	/* No mandatory locks */
 	if (__mandatory_lock(inode) && fl->fl_type != F_UNLCK)
@@ -204,7 +200,8 @@ static int v9fs_file_do_lock(struct file *filp, int cmd, struct file_lock *fl)
 			break;
 		if (status == P9_LOCK_BLOCKED && !IS_SETLKW(cmd))
 			break;
-		schedule_timeout_interruptible(P9_LOCK_TIMEOUT);
+		if (schedule_timeout_interruptible(P9_LOCK_TIMEOUT) != 0)
+			break;
 	}
 
 	/* map 9p status to VFS status */
@@ -301,11 +298,11 @@ static int v9fs_file_getlock(struct file *filp, struct file_lock *fl)
 
 static int v9fs_file_lock_dotl(struct file *filp, int cmd, struct file_lock *fl)
 {
-	struct inode *inode = filp->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(filp);
 	int ret = -ENOLCK;
 
-	P9_DPRINTK(P9_DEBUG_VFS, "filp: %p cmd:%d lock: %p name: %s\n", filp,
-				cmd, fl, filp->f_path.dentry->d_name.name);
+	p9_debug(P9_DEBUG_VFS, "filp: %p cmd:%d lock: %p name: %s\n",
+		 filp, cmd, fl, filp->f_path.dentry->d_name.name);
 
 	/* No mandatory locks */
 	if (__mandatory_lock(inode) && fl->fl_type != F_UNLCK)
@@ -337,11 +334,11 @@ out_err:
 static int v9fs_file_flock_dotl(struct file *filp, int cmd,
 	struct file_lock *fl)
 {
-	struct inode *inode = filp->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(filp);
 	int ret = -ENOLCK;
 
-	P9_DPRINTK(P9_DEBUG_VFS, "filp: %p cmd:%d lock: %p name: %s\n", filp,
-				cmd, fl, filp->f_path.dentry->d_name.name);
+	p9_debug(P9_DEBUG_VFS, "filp: %p cmd:%d lock: %p name: %s\n",
+		 filp, cmd, fl, filp->f_path.dentry->d_name.name);
 
 	/* No mandatory locks */
 	if (__mandatory_lock(inode) && fl->fl_type != F_UNLCK)
@@ -384,8 +381,8 @@ v9fs_fid_readn(struct p9_fid *fid, char *data, char __user *udata, u32 count,
 {
 	int n, total, size;
 
-	P9_DPRINTK(P9_DEBUG_VFS, "fid %d offset %llu count %d\n", fid->fid,
-		   (long long unsigned) offset, count);
+	p9_debug(P9_DEBUG_VFS, "fid %d offset %llu count %d\n",
+		 fid->fid, (long long unsigned)offset, count);
 	n = 0;
 	total = 0;
 	size = fid->iounit ? fid->iounit : fid->clnt->msize - P9_IOHDRSZ;
@@ -443,7 +440,7 @@ v9fs_file_read(struct file *filp, char __user *udata, size_t count,
 	struct p9_fid *fid;
 	size_t size;
 
-	P9_DPRINTK(P9_DEBUG_VFS, "count %zu offset %lld\n", count, *offset);
+	p9_debug(P9_DEBUG_VFS, "count %zu offset %lld\n", count, *offset);
 	fid = filp->private_data;
 
 	size = fid->iounit ? fid->iounit : fid->clnt->msize - P9_IOHDRSZ;
@@ -470,8 +467,8 @@ v9fs_file_write_internal(struct inode *inode, struct p9_fid *fid,
 	loff_t origin = *offset;
 	unsigned long pg_start, pg_end;
 
-	P9_DPRINTK(P9_DEBUG_VFS, "data %p count %d offset %x\n", data,
-		(int)count, (int)*offset);
+	p9_debug(P9_DEBUG_VFS, "data %p count %d offset %x\n",
+		 data, (int)count, (int)*offset);
 
 	clnt = fid->clnt;
 	do {
@@ -528,7 +525,7 @@ v9fs_file_write(struct file *filp, const char __user * data,
 	if (!count)
 		goto out;
 
-	retval = v9fs_file_write_internal(filp->f_path.dentry->d_inode,
+	retval = v9fs_file_write_internal(file_inode(filp),
 					filp->private_data,
 					data, count, &origin, 1);
 	/* update offset on successful write */
@@ -539,32 +536,49 @@ out:
 }
 
 
-static int v9fs_file_fsync(struct file *filp, int datasync)
+static int v9fs_file_fsync(struct file *filp, loff_t start, loff_t end,
+			   int datasync)
 {
 	struct p9_fid *fid;
+	struct inode *inode = filp->f_mapping->host;
 	struct p9_wstat wstat;
 	int retval;
 
-	P9_DPRINTK(P9_DEBUG_VFS, "filp %p datasync %x\n", filp, datasync);
+	retval = filemap_write_and_wait_range(inode->i_mapping, start, end);
+	if (retval)
+		return retval;
+
+	mutex_lock(&inode->i_mutex);
+	p9_debug(P9_DEBUG_VFS, "filp %p datasync %x\n", filp, datasync);
 
 	fid = filp->private_data;
 	v9fs_blank_wstat(&wstat);
 
 	retval = p9_client_wstat(fid, &wstat);
+	mutex_unlock(&inode->i_mutex);
+
 	return retval;
 }
 
-int v9fs_file_fsync_dotl(struct file *filp, int datasync)
+int v9fs_file_fsync_dotl(struct file *filp, loff_t start, loff_t end,
+			 int datasync)
 {
 	struct p9_fid *fid;
+	struct inode *inode = filp->f_mapping->host;
 	int retval;
 
-	P9_DPRINTK(P9_DEBUG_VFS, "v9fs_file_fsync_dotl: filp %p datasync %x\n",
-			filp, datasync);
+	retval = filemap_write_and_wait_range(inode->i_mapping, start, end);
+	if (retval)
+		return retval;
+
+	mutex_lock(&inode->i_mutex);
+	p9_debug(P9_DEBUG_VFS, "filp %p datasync %x\n", filp, datasync);
 
 	fid = filp->private_data;
 
 	retval = p9_client_fsync(fid, datasync);
+	mutex_unlock(&inode->i_mutex);
+
 	return retval;
 }
 
@@ -586,11 +600,14 @@ v9fs_vm_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 	struct v9fs_inode *v9inode;
 	struct page *page = vmf->page;
 	struct file *filp = vma->vm_file;
-	struct inode *inode = filp->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(filp);
 
 
-	P9_DPRINTK(P9_DEBUG_VFS, "page %p fid %lx\n",
-		   page, (unsigned long)filp->private_data);
+	p9_debug(P9_DEBUG_VFS, "page %p fid %lx\n",
+		 page, (unsigned long)filp->private_data);
+
+	/* Update file times before taking page lock */
+	file_update_time(filp);
 
 	v9inode = V9FS_I(inode);
 	/* make sure the cache has finished storing the page */
@@ -599,6 +616,7 @@ v9fs_vm_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 	lock_page(page);
 	if (page->mapping != inode->i_mapping)
 		goto out_unlock;
+	wait_for_stable_page(page);
 
 	return VM_FAULT_LOCKED;
 out_unlock:
@@ -717,6 +735,7 @@ v9fs_cached_file_write(struct file *filp, const char __user * data,
 static const struct vm_operations_struct v9fs_file_vm_ops = {
 	.fault = filemap_fault,
 	.page_mkwrite = v9fs_vm_page_mkwrite,
+	.remap_pages = generic_file_remap_pages,
 };
 
 

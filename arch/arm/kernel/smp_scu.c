@@ -11,6 +11,7 @@
 #include <linux/init.h>
 #include <linux/io.h>
 
+#include <asm/smp_plat.h>
 #include <asm/smp_scu.h>
 #include <asm/cacheflush.h>
 #include <asm/cputype.h>
@@ -21,6 +22,7 @@
 #define SCU_INVALIDATE		0x0c
 #define SCU_FPGA_REVISION	0x10
 
+#ifdef CONFIG_SMP
 /*
  * Get the number of CPU cores from the SCU configuration
  */
@@ -33,13 +35,13 @@ unsigned int __init scu_get_core_count(void __iomem *scu_base)
 /*
  * Enable the SCU
  */
-void __init scu_enable(void __iomem *scu_base)
+void scu_enable(void __iomem *scu_base)
 {
 	u32 scu_ctrl;
 
 #ifdef CONFIG_ARM_ERRATA_764369
 	/* Cortex-A9 only */
-	if ((read_cpuid(CPUID_ID) & 0xff0ffff0) == 0x410fc090) {
+	if ((read_cpuid_id() & 0xff0ffff0) == 0x410fc090) {
 		scu_ctrl = __raw_readl(scu_base + 0x30);
 		if (!(scu_ctrl & 1))
 			__raw_writel(scu_ctrl | 0x1, scu_base + 0x30);
@@ -60,6 +62,7 @@ void __init scu_enable(void __iomem *scu_base)
 	 */
 	flush_cache_all();
 }
+#endif
 
 /*
  * Set the executing CPUs power mode as defined.  This will be in
@@ -72,7 +75,7 @@ void __init scu_enable(void __iomem *scu_base)
 int scu_power_mode(void __iomem *scu_base, unsigned int mode)
 {
 	unsigned int val;
-	int cpu = smp_processor_id();
+	int cpu = MPIDR_AFFINITY_LEVEL(cpu_logical_map(smp_processor_id()), 0);
 
 	if (mode > 3 || mode == 1 || cpu > 3)
 		return -EINVAL;

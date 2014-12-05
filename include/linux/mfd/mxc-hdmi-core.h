@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@
 #ifndef __LINUX_MXC_HDMI_CORE_H_
 #define __LINUX_MXC_HDMI_CORE_H_
 
-#include <mach/mxc_edid.h>
+#include <video/mxc_edid.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -54,7 +54,6 @@ extern int mxc_hdmi_disp_id;
 
 void hdmi_set_registered(int registered);
 int hdmi_get_registered(void);
-unsigned int hdmi_SDMA_check(void);
 int mxc_hdmi_abort_stream(void);
 int mxc_hdmi_register_audio(struct snd_pcm_substream *substream);
 void mxc_hdmi_unregister_audio(struct snd_pcm_substream *substream);

@@ -14,8 +14,6 @@ extern struct proto tcpv6_prot;
 
 struct flowi6;
 
-extern void initialize_hashidentrnd(void);
-
 /* extension headers */
 extern int				ipv6_exthdrs_init(void);
 extern void				ipv6_exthdrs_exit(void);
@@ -36,16 +34,17 @@ extern int				udpv6_connect(struct sock *sk,
 						      struct sockaddr *uaddr,
 						      int addr_len);
 
-extern int			datagram_recv_ctl(struct sock *sk,
-						  struct msghdr *msg,
-						  struct sk_buff *skb);
+extern int			ip6_datagram_recv_ctl(struct sock *sk,
+						      struct msghdr *msg,
+						      struct sk_buff *skb);
 
-extern int			datagram_send_ctl(struct net *net,
-						  struct msghdr *msg,
-						  struct flowi6 *fl6,
-						  struct ipv6_txoptions *opt,
-						  int *hlimit, int *tclass,
-						  int *dontfrag);
+extern int			ip6_datagram_send_ctl(struct net *net,
+						      struct sock *sk,
+						      struct msghdr *msg,
+						      struct flowi6 *fl6,
+						      struct ipv6_txoptions *opt,
+						      int *hlimit, int *tclass,
+						      int *dontfrag);
 
 #define		LOOPBACK4_IPV6		cpu_to_be32(0x7f000006)
 

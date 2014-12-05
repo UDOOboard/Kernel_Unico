@@ -27,6 +27,7 @@ typedef struct _LINUX_MDL_MAP
     gctINT                  pid;
     gctPOINTER              vmaAddr;
     struct vm_area_struct * vma;
+    gctINT                  reference;
     struct _LINUX_MDL_MAP * next;
 }
 LINUX_MDL_MAP;
@@ -54,6 +55,9 @@ typedef struct _LINUX_MDL
     gctINT                  numPages;
     gctINT                  pagedMem;
     gctBOOL                 contiguous;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27)
+    gctBOOL                 exact;
+#endif
     dma_addr_t              dmaHandle;
     PLINUX_MDL_MAP          maps;
     struct _LINUX_MDL *     prev;

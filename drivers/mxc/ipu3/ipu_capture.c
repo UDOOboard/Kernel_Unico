@@ -18,14 +18,15 @@
  *
  * @ingroup IPU
  */
-#include <linux/types.h>
+#include <linux/clk.h>
+#include <linux/delay.h>
+#include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/errno.h>
+#include <linux/ipu-v3.h>
+#include <linux/module.h>
 #include <linux/spinlock.h>
-#include <linux/delay.h>
-#include <linux/clk.h>
-#include <mach/ipu-v3.h>
+#include <linux/types.h>
 
 #include "ipu_prv.h"
 #include "ipu_regs.h"
@@ -98,6 +99,7 @@ ipu_csi_init_interface(struct ipu_soc *ipu, uint16_t width, uint16_t height,
 		cfg_param.data_fmt = CSI_SENS_CONF_DATA_FMT_RGB_YUV444;
 		break;
 	case IPU_PIX_FMT_GENERIC:
+	case IPU_PIX_FMT_GENERIC_16:
 		cfg_param.data_fmt = CSI_SENS_CONF_DATA_FMT_BAYER;
 		break;
 	case IPU_PIX_FMT_RGB565:
@@ -129,6 +131,10 @@ ipu_csi_init_interface(struct ipu_soc *ipu, uint16_t width, uint16_t height,
 
 	ipu_csi_write(ipu, csi, data, CSI_SENS_CONF);
 
+	/* Setup the mclk */
+	if (cfg_param.mclk > 0)
+		_ipu_csi_mclk_set(ipu, cfg_param.mclk, csi);
+
 	/* Setup sensor frame size */
 	ipu_csi_write(ipu, csi, (width - 1) | (height - 1) << 16, CSI_SENS_FRM_SIZE);
 
@@ -140,21 +146,6 @@ ipu_csi_init_interface(struct ipu_soc *ipu, uint16_t width, uint16_t height,
 		if (width == 720 && height == 625) {
 			/* PAL case */
 			/*
-			 * Field0BlankEnd = 0x6, Field0BlankStart = 0x2,
-			 * Field0ActiveEnd = 0x4, Field0ActiveStart = 0
-			 */
-			ipu_csi_write(ipu, csi, 0x40596, CSI_CCIR_CODE_1);
-			/*
-			 * Field1BlankEnd = 0x7, Field1BlankStart = 0x3,
-			 * Field1ActiveEnd = 0x5, Field1ActiveStart = 0x1
-			 */
-			ipu_csi_write(ipu, csi, 0xD07DF, CSI_CCIR_CODE_2);
-
-			ipu_csi_write(ipu, csi, 0xFF0000, CSI_CCIR_CODE_3);
-
-		} else if (width == 720 && height == 525) {
-			/* NTSC case */
-			/*
 			 * Field0BlankEnd = 0x7, Field0BlankStart = 0x3,
 			 * Field0ActiveEnd = 0x5, Field0ActiveStart = 0x1
 			 */
@@ -164,6 +155,20 @@ ipu_csi_init_interface(struct ipu_soc *ipu, uint16_t width, uint16_t height,
 			 * Field1ActiveEnd = 0x4, Field1ActiveStart = 0
 			 */
 			ipu_csi_write(ipu, csi, 0x40596, CSI_CCIR_CODE_2);
+			ipu_csi_write(ipu, csi, 0xFF0000, CSI_CCIR_CODE_3);
+
+		} else if (width == 720 && height == 525) {
+			/* NTSC case */
+			/*
+			 * Field1BlankEnd = 0x6, Field1BlankStart = 0x2,
+			 * Field1ActiveEnd = 0x4, Field1ActiveStart = 0
+			 */
+			ipu_csi_write(ipu, csi, 0x40596, CSI_CCIR_CODE_1);
+			/*
+			 * Field0BlankEnd = 0x7, Field0BlankStart = 0x3,
+			 * Field0ActiveEnd = 0x5, Field0ActiveStart = 0x1
+			 */
+			ipu_csi_write(ipu, csi, 0xD07DF, CSI_CCIR_CODE_2);
 			ipu_csi_write(ipu, csi, 0xFF0000, CSI_CCIR_CODE_3);
 		} else {
 			dev_err(ipu->dev, "Unsupported CCIR656 interlaced "
@@ -234,6 +239,10 @@ EXPORT_SYMBOL(ipu_csi_get_sensor_protocol);
  */
 int ipu_csi_enable_mclk(struct ipu_soc *ipu, int csi, bool flag, bool wait)
 {
+	/* Return immediately if there is no csi_clk to manage */
+	if (ipu->csi_clk[csi] == NULL)
+		return 0;
+
 	if (flag) {
 		clk_enable(ipu->csi_clk[csi]);
 		if (wait == true)

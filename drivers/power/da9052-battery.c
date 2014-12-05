@@ -1,712 +1,551 @@
 /*
- * da9052-battery.c  --  Batttery Driver for Dialog DA9052
+ * Batttery Driver for Dialog DA9052 PMICs
  *
- * Copyright(c) 2009 Dialog Semiconductor Ltd.
- 
- * Author: Dialog Semiconductor Ltd <dchen@diasemi.com>
+ * Copyright(c) 2011 Dialog Semiconductor Ltd.
  *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
+ * Author: David Dajun Chen <dchen@diasemi.com>
  *
+ * This program is free software; you can redistribute  it and/or modify it
+ * under  the terms of  the GNU General  Public License as published by the
+ * Free Software Foundation;  either version 2 of the  License, or (at your
+ * option) any later version.
  */
 
-#include <linux/module.h>
-#include <linux/fs.h>
 #include <linux/delay.h>
+#include <linux/freezer.h>
+#include <linux/fs.h>
+#include <linux/jiffies.h>
+#include <linux/module.h>
 #include <linux/timer.h>
 #include <linux/uaccess.h>
-#include <linux/jiffies.h>
-#include <linux/power_supply.h>
 #include <linux/platform_device.h>
-#include <linux/freezer.h>
+#include <linux/power_supply.h>
 
 #include <linux/mfd/da9052/da9052.h>
+#include <linux/mfd/da9052/pdata.h>
 #include <linux/mfd/da9052/reg.h>
-#include <linux/mfd/da9052/bat.h>
-#include <linux/mfd/da9052/adc.h>
 
-#define DA9052_BAT_DEVICE_NAME			"da9052-bat"
+/* STATIC CONFIGURATION */
+#define DA9052_BAT_CUTOFF_VOLT		2800
+#define DA9052_BAT_TSH			62000
+#define DA9052_BAT_LOW_CAP		4
+#define DA9052_AVG_SZ			4
+#define DA9052_VC_TBL_SZ		68
+#define DA9052_VC_TBL_REF_SZ		3
 
-static const char  __initdata banner[] = KERN_INFO "DA9052 BAT, (c) \
-2009 Dialog semiconductor Ltd.\n";
+#define DA9052_ISET_USB_MASK		0x0F
+#define DA9052_CHG_USB_ILIM_MASK	0x40
+#define DA9052_CHG_LIM_COLS		16
 
-static struct da9052_bat_hysteresis bat_hysteresis;
-static struct da9052_bat_event_registration event_status;
+#define DA9052_MEAN(x, y)		((x + y) / 2)
 
+enum charger_type_enum {
+	DA9052_NOCHARGER = 1,
+	DA9052_CHARGER,
+};
 
-static u16 array_hys_batvoltage[2];
-static u16 bat_volt_arr[3];
-static u8 hys_flag = FALSE;
+static const u16 da9052_chg_current_lim[2][DA9052_CHG_LIM_COLS] = {
+	{70,  80,  90,  100, 110, 120, 400,  450,
+	 500, 550, 600, 650, 700, 900, 1100, 1300},
+	{80,  90,  100, 110,  120,  400,  450,  500,
+	 550, 600, 800, 1000, 1200, 1400, 1600, 1800},
+};
 
-static int da9052_read(struct da9052 *da9052, u8 reg_address, u8 *reg_data)
+static const u16 vc_tbl_ref[3] = {10, 25, 40};
+/* Lookup table for voltage vs capacity */
+static u32 const vc_tbl[3][68][2] = {
+	/* For temperature 10 degree Celsius */
+	{
+	{4082, 100}, {4036, 98},
+	{4020, 96}, {4008, 95},
+	{3997, 93}, {3983, 91},
+	{3964, 90}, {3943, 88},
+	{3926, 87}, {3912, 85},
+	{3900, 84}, {3890, 82},
+	{3881, 80}, {3873, 79},
+	{3865, 77}, {3857, 76},
+	{3848, 74}, {3839, 73},
+	{3829, 71}, {3820, 70},
+	{3811, 68}, {3802, 67},
+	{3794, 65}, {3785, 64},
+	{3778, 62}, {3770, 61},
+	{3763, 59}, {3756, 58},
+	{3750, 56}, {3744, 55},
+	{3738, 53}, {3732, 52},
+	{3727, 50}, {3722, 49},
+	{3717, 47}, {3712, 46},
+	{3708, 44}, {3703, 43},
+	{3700, 41}, {3696, 40},
+	{3693, 38}, {3691, 37},
+	{3688, 35}, {3686, 34},
+	{3683, 32}, {3681, 31},
+	{3678, 29}, {3675, 28},
+	{3672, 26}, {3669, 25},
+	{3665, 23}, {3661, 22},
+	{3656, 21}, {3651, 19},
+	{3645, 18}, {3639, 16},
+	{3631, 15}, {3622, 13},
+	{3611, 12}, {3600, 10},
+	{3587, 9}, {3572, 7},
+	{3548, 6}, {3503, 5},
+	{3420, 3}, {3268, 2},
+	{2992, 1}, {2746, 0}
+	},
+	/* For temperature 25 degree Celsius */
+	{
+	{4102, 100}, {4065, 98},
+	{4048, 96}, {4034, 95},
+	{4021, 93}, {4011, 92},
+	{4001, 90}, {3986, 88},
+	{3968, 87}, {3952, 85},
+	{3938, 84}, {3926, 82},
+	{3916, 81}, {3908, 79},
+	{3900, 77}, {3892, 76},
+	{3883, 74}, {3874, 73},
+	{3864, 71}, {3855, 70},
+	{3846, 68}, {3836, 67},
+	{3827, 65}, {3819, 64},
+	{3810, 62}, {3801, 61},
+	{3793, 59}, {3786, 58},
+	{3778, 56}, {3772, 55},
+	{3765, 53}, {3759, 52},
+	{3754, 50}, {3748, 49},
+	{3743, 47}, {3738, 46},
+	{3733, 44}, {3728, 43},
+	{3724, 41}, {3720, 40},
+	{3716, 38}, {3712, 37},
+	{3709, 35}, {3706, 34},
+	{3703, 33}, {3701, 31},
+	{3698, 30}, {3696, 28},
+	{3693, 27}, {3690, 25},
+	{3687, 24}, {3683, 22},
+	{3680, 21}, {3675, 19},
+	{3671, 18}, {3666, 17},
+	{3660, 15}, {3654, 14},
+	{3647, 12}, {3639, 11},
+	{3630, 9}, {3621, 8},
+	{3613, 6}, {3606, 5},
+	{3597, 4}, {3582, 2},
+	{3546, 1}, {2747, 0}
+	},
+	/* For temperature 40 degree Celsius */
+	{
+	{4114, 100}, {4081, 98},
+	{4065, 96}, {4050, 95},
+	{4036, 93}, {4024, 92},
+	{4013, 90}, {4002, 88},
+	{3990, 87}, {3976, 85},
+	{3962, 84}, {3950, 82},
+	{3939, 81}, {3930, 79},
+	{3921, 77}, {3912, 76},
+	{3902, 74}, {3893, 73},
+	{3883, 71}, {3874, 70},
+	{3865, 68}, {3856, 67},
+	{3847, 65}, {3838, 64},
+	{3829, 62}, {3820, 61},
+	{3812, 59}, {3803, 58},
+	{3795, 56}, {3787, 55},
+	{3780, 53}, {3773, 52},
+	{3767, 50}, {3761, 49},
+	{3756, 47}, {3751, 46},
+	{3746, 44}, {3741, 43},
+	{3736, 41}, {3732, 40},
+	{3728, 38}, {3724, 37},
+	{3720, 35}, {3716, 34},
+	{3713, 33}, {3710, 31},
+	{3707, 30}, {3704, 28},
+	{3701, 27}, {3698, 25},
+	{3695, 24}, {3691, 22},
+	{3686, 21}, {3681, 19},
+	{3676, 18}, {3671, 17},
+	{3666, 15}, {3661, 14},
+	{3655, 12}, {3648, 11},
+	{3640, 9}, {3632, 8},
+	{3622, 6}, {3616, 5},
+	{3611, 4}, {3604, 2},
+	{3594, 1}, {2747, 0}
+	}
+};
+
+struct da9052_battery {
+	struct da9052 *da9052;
+	struct power_supply psy;
+	struct notifier_block nb;
+	int charger_type;
+	int status;
+	int health;
+};
+
+static inline int volt_reg_to_mV(int value)
 {
-	struct da9052_ssc_msg msg;
+	return ((value * 1000) / 512) + 2500;
+}
+
+static inline int ichg_reg_to_mA(int value)
+{
+	return (value * 3900) / 1000;
+}
+
+static int da9052_read_chgend_current(struct da9052_battery *bat,
+				       int *current_mA)
+{
 	int ret;
 
-	msg.addr = reg_address;
-	msg.data = 0;
-
-	da9052_lock(da9052);
-	ret = da9052->read(da9052, &msg);
-	if (ret)
-		goto ssc_comm_err;
-	da9052_unlock(da9052);
-
-	*reg_data = msg.data;
-	return 0;
-ssc_comm_err:
-	da9052_unlock(da9052);
-	return ret;
-}
-
-static s32 da9052_adc_read_ich(struct da9052 *da9052, u16 *data)
-{
-	struct da9052_ssc_msg msg;
-	da9052_lock(da9052);
-	/* Read charging conversion register */
-	msg.addr = DA9052_ICHGAV_REG;
-	msg.data = 0;
-	if (da9052->read(da9052, &msg)) {
-		da9052_unlock(da9052);
-		return DA9052_SSC_FAIL;
-	}
-	da9052_unlock(da9052);
-
-	*data = (u16)msg.data;
-	DA9052_DEBUG(
-       "In function: %s, ICHGAV_REG value read (1)= 0x%X \n",
-		__func__, msg.data);
-	return SUCCESS;
-}
-
-
-static s32 da9052_adc_read_tbat(struct da9052 *da9052, u16 *data)
-{
-	s32 ret;
-	u8 reg_data;
-
-	ret = da9052_read(da9052, DA9052_TBATRES_REG, &reg_data);
-	if (ret)
-		return ret;
-	*data = (u16)reg_data;
-
-	DA9052_DEBUG("In function: %s, TBATRES_REG value read (1)= 0x%X \n",
-		__func__, msg.data);
-	return SUCCESS;
-}
-
-s32 da9052_adc_read_vbat(struct da9052 *da9052, u16 *data)
-{
-	s32 ret;
-
-	ret = da9052_manual_read(da9052, DA9052_ADC_VBAT);
-	DA9052_DEBUG("In function: %s, VBAT value read (1)= 0x%X \n",
-		__func__, temp);
-	if (ret == -EIO) {
-		*data = 0;
-		return ret;
-	} else {
-		*data = ret;
-		return 0;
-	}
-	return 0;
-}
-
-
-static u16 filter_sample(u16 *buffer)
-{
-	u8 count;
-	u16 tempvalue = 0;
-	u16 ret;
-
-	if (buffer == NULL)
+	if (bat->status == POWER_SUPPLY_STATUS_DISCHARGING)
 		return -EINVAL;
 
-	for (count = 0; count < DA9052_FILTER_SIZE; count++)
-		tempvalue = tempvalue + *(buffer + count);
-
-	ret = tempvalue/DA9052_FILTER_SIZE;
-	return ret;
-}
-
-static s32  da9052_bat_get_battery_temperature(struct da9052_charger_device
-	*chg_device, u16 *buffer)
-{
-
-	u8 count;
-	u16 filterqueue[DA9052_FILTER_SIZE];
-
-	/* Measure the battery temperature using ADC function.
-		Number of read equal to average filter size*/
-
-	for (count = 0; count < DA9052_FILTER_SIZE; count++)
-		if (da9052_adc_read_tbat(chg_device->da9052, &filterqueue[count]))
-			return -EIO;
-
-	/* Apply Average filter */
-	filterqueue[0] = filter_sample(filterqueue);
-
-	chg_device->bat_temp = filterqueue[0];
-	*buffer = chg_device->bat_temp;
-
-	return SUCCESS;
-}
-
-static s32  da9052_bat_get_chg_current(struct da9052_charger_device
-	*chg_device, u16 *buffer)
-{
-	if (chg_device->status == POWER_SUPPLY_STATUS_DISCHARGING)
-		return -EIO;
-
-		/* Measure the Charger current using ADC function */
-	if (da9052_adc_read_ich(chg_device->da9052, buffer))
-		return -EIO;
-
-	/* Convert the raw value in terms of mA */
-	chg_device->chg_current = ichg_reg_to_mA(*buffer);
-	*buffer = chg_device->chg_current;
-
-	return 0;
-}
-
-
-s32  da9052_bat_get_battery_voltage(struct da9052_charger_device *chg_device,
- u16 *buffer)
-{
-	u8 count;
-	u16 filterqueue[DA9052_FILTER_SIZE];
-
-	/* Measure the battery voltage using ADC function.
-		Number of read equal to average filter size*/
-	for (count = 0; count < DA9052_FILTER_SIZE; count++)
-		if (da9052_adc_read_vbat(chg_device->da9052, &filterqueue[count]))
-			return -EIO;
-
-	/* Apply average filter */
-	filterqueue[0] = filter_sample(filterqueue);
-
-	/* Convert battery voltage raw value in terms of mV */
-	chg_device->bat_voltage = volt_reg_to_mV(filterqueue[0]);
-	*buffer = chg_device->bat_voltage;
-	return 0;
-}
-
-static void da9052_bat_status_update(struct da9052_charger_device
-	*chg_device)
-{
-	struct da9052_ssc_msg msg;
-	u16 current_value = 0;
-	u16 buffer =0;
-	u8 regvalue = 0;
-	u8 old_status = chg_device->status;
-	
-	DA9052_DEBUG("FUNCTION = %s \n", __func__);
-
-	/* Read Status A register */
-	msg.addr = DA9052_STATUSA_REG;
-	msg.data = 0;
-	da9052_lock(chg_device->da9052);
-
-	if (chg_device->da9052->read(chg_device->da9052, &msg)) {
-		DA9052_DEBUG("%s : failed\n", __func__);
-		da9052_unlock(chg_device->da9052);
-		return;
-	}
-	regvalue = msg.data;
-
-	/* Read Status B register */
-	msg.addr = DA9052_STATUSB_REG;
-	msg.data = 0;
-	if (chg_device->da9052->read(chg_device->da9052, &msg)) {
-		DA9052_DEBUG("%s : failed\n", __func__);
-		da9052_unlock(chg_device->da9052);
-		return;
-	}
-	da9052_unlock(chg_device->da9052);
-
-	/* If DCINDET and DCINSEL are set then connected charger is
-						WALL Charger unit */
-	if( (regvalue & DA9052_STATUSA_DCINSEL) 
-				&& (regvalue & DA9052_STATUSA_DCINDET) ) {
-
-		chg_device->charger_type = DA9052_WALL_CHARGER;
-	}
-	/* If VBUS_DET and VBUSEL are set then connected charger is
-		USB Type */
-	else if((regvalue & DA9052_STATUSA_VBUSSEL) 
-				&& (regvalue & DA9052_STATUSA_VBUSDET)) {
-		if (regvalue & DA9052_STATUSA_VDATDET) {
-			chg_device->charger_type = DA9052_USB_CHARGER;
-		}
-		else {
-			/* Else it has to be USB Host charger */
-			chg_device->charger_type = DA9052_USB_HUB;
-		}
-	}
-	/* Battery is discharging since charging device is not present */
-	else
-	{
-		chg_device->charger_type = DA9052_NOCHARGER;
-		/* Eqv to DISCHARGING_WITHOUT_CHARGER state */
-		chg_device->status = POWER_SUPPLY_STATUS_DISCHARGING;
-	}
-
-	
-	if( chg_device->charger_type != DA9052_NOCHARGER ) {
-		/* if Charging end flag is set and Charging current is greater
-			than charging end limit then battery is charging */
-		if ((msg.data & DA9052_STATUSB_CHGEND) != 0)  {
-				
-			if(da9052_bat_get_chg_current(chg_device,&current_value)) {
-					return;
-			}
-				
-			if( current_value >= chg_device->chg_end_current ) {
-				chg_device->status = POWER_SUPPLY_STATUS_CHARGING;
-			}
-			else {
-				/* Eqv to DISCHARGING_WITH_CHARGER state*/
-				chg_device->status = POWER_SUPPLY_STATUS_NOT_CHARGING;
-			}
-		}
-		/* if Charging end flag is cleared then battery is charging */
-		else {
-			chg_device->status = POWER_SUPPLY_STATUS_CHARGING;
-		}
-		
-		if( POWER_SUPPLY_STATUS_CHARGING == chg_device->status){
-			if(msg.data != DA9052_STATUSB_CHGPRE) {
-				/* Measure battery voltage. if battery voltage is greater than
-				(VCHG_BAT - VCHG_DROP) then battery is in the termintation mode.
-				*/
-				if(da9052_bat_get_battery_voltage(chg_device,&buffer)) {
-					DA9052_DEBUG("%s : failed\n",__FUNCTION__);
-					return ;
-				}
-				if(buffer > (chg_device->bat_target_voltage -
-					chg_device->charger_voltage_drop) &&
-					( chg_device->cal_capacity >= 99 ) ){
-					chg_device->status = POWER_SUPPLY_STATUS_FULL;
-				}
-				
-			}
-		}
-	}
-	
-	if(chg_device->illegal)
-		chg_device->health = POWER_SUPPLY_HEALTH_UNKNOWN;
-	else if (chg_device->cal_capacity < chg_device->bat_capacity_limit_low)
-		chg_device->health = POWER_SUPPLY_HEALTH_DEAD;
-	else
-		chg_device->health = POWER_SUPPLY_HEALTH_GOOD;
-	
-	if ( chg_device->status != old_status)
-		power_supply_changed(&chg_device->psy);
-		
-	return;
-}
-
-static s32 da9052_bat_suspend_charging(struct da9052_charger_device *chg_device)
-{
-	struct da9052_ssc_msg msg;
-
-	if ((chg_device->status == POWER_SUPPLY_STATUS_DISCHARGING) ||
-		(chg_device->status == POWER_SUPPLY_STATUS_NOT_CHARGING))
-		return 0;
-
-	msg.addr = DA9052_INPUTCONT_REG;
-	msg.data = 0;
-	da9052_lock(chg_device->da9052);
-	/* Read Input condition register */
-	if (chg_device->da9052->read(chg_device->da9052, &msg)) {
-		da9052_unlock(chg_device->da9052);
-		return DA9052_SSC_FAIL;
-	}
-
-	/* set both Wall charger and USB charger suspend bit */
-	msg.data = set_bits(msg.data, DA9052_INPUTCONT_DCINSUSP);
-	msg.data = set_bits(msg.data, DA9052_INPUTCONT_VBUSSUSP);
-
-	/* Write to Input control register */
-	if (chg_device->da9052->write(chg_device->da9052, &msg)) {
-		da9052_unlock(chg_device->da9052);
-		DA9052_DEBUG("%s : failed\n", __func__);
-		return DA9052_SSC_FAIL;
-	}
-	da9052_unlock(chg_device->da9052);
-
-	DA9052_DEBUG("%s : Sucess\n", __func__);
-	return 0;
-}
-
-u32 interpolated(u32 vbat_lower, u32  vbat_upper, u32  level_lower,
-	u32  level_upper, u32 bat_voltage)
-{
-	s32 temp;
-	/*apply formula y= yk + (x - xk) * (yk+1 -yk)/(xk+1 -xk) */
-	temp = ((level_upper - level_lower) * 1000)/(vbat_upper - vbat_lower);
-	temp = level_lower + (((bat_voltage - vbat_lower) * temp)/1000);
-
-	return temp;
-}
-
-s32 capture_first_correct_vbat_sample(struct da9052_charger_device *chg_device,
-u16 *battery_voltage)
-{
-	static u8 count;
-	s32 ret = 0;
-	u32 temp_data = 0;
-
-	ret = da9052_bat_get_battery_voltage(chg_device,
-		&bat_volt_arr[count]);
-	if (ret)
+	ret = da9052_reg_read(bat->da9052, DA9052_ICHG_END_REG);
+	if (ret < 0)
 		return ret;
-	count++;
 
-	if (count < chg_device->vbat_first_valid_detect_iteration)
-		return FAILURE;
-	for (count = 0; count <
-		(chg_device->vbat_first_valid_detect_iteration - 1);
-		count++) {
-			temp_data = (bat_volt_arr[count] *
-			(chg_device->hysteresis_window_size))/100;
-		bat_hysteresis.upper_limit = bat_volt_arr[count] + temp_data;
-		bat_hysteresis.lower_limit = bat_volt_arr[count] - temp_data;
+	*current_mA = ichg_reg_to_mA(ret & DA9052_ICHGEND_ICHGEND);
 
-		if ((bat_volt_arr[count + 1] < bat_hysteresis.upper_limit) &&
-			(bat_volt_arr[count + 1] >
-			bat_hysteresis.lower_limit)) {
-				*battery_voltage = (bat_volt_arr[count] +
-				bat_volt_arr[count+1]) / 2;
-				hys_flag = TRUE;
-			return 0;
-		}
-	}
-
-	for (count = 0; count <
-		(chg_device->vbat_first_valid_detect_iteration - 1);
-			count++)
-		bat_volt_arr[count] = bat_volt_arr[count + 1];
-
-	return FAILURE;
+	return 0;
 }
 
-
-s32 check_hystersis(struct da9052_charger_device *chg_device, u16 *bat_voltage)
+static int da9052_read_chg_current(struct da9052_battery *bat, int *current_mA)
 {
-	u8 ret = 0;
-	u32 offset = 0;
+	int ret;
 
-	/* Measure battery voltage using BAT internal function*/
-	if (hys_flag == FALSE) {
-		ret = capture_first_correct_vbat_sample
-			(chg_device, &array_hys_batvoltage[0]);
-		if (ret)
-			return ret;
-	}
+	if (bat->status == POWER_SUPPLY_STATUS_DISCHARGING)
+		return -EINVAL;
 
-	ret = da9052_bat_get_battery_voltage
-		(chg_device, &array_hys_batvoltage[1]);
-	if (ret)
+	ret = da9052_reg_read(bat->da9052, DA9052_ICHG_AV_REG);
+	if (ret < 0)
 		return ret;
-	*bat_voltage = array_hys_batvoltage[1];
 
-#if DA9052_BAT_FILTER_HYS
-	printk(KERN_CRIT "\nBAT_LOG: Previous Battery Voltage = %d mV\n",
-				array_hys_batvoltage[0]);
-	printk(KERN_CRIT "\nBAT_LOG:Battery Voltage Before Filter = %d mV\n",
-				array_hys_batvoltage[1]);
-#endif
-	/* Check if measured battery voltage value is within the hysteresis
-		window limit using measured battey votlage value */
-	if ((bat_hysteresis.upper_limit < *bat_voltage) ||
-			(bat_hysteresis.lower_limit > *bat_voltage)) {
+	*current_mA = ichg_reg_to_mA(ret & DA9052_ICHGAV_ICHGAV);
 
-		bat_hysteresis.index++;
-		if (bat_hysteresis.index ==
-			chg_device->hysteresis_no_of_reading) {
-			/* Hysteresis Window is set to +- of
-			HYSTERESIS_WINDOW_SIZE percentage of current VBAT */
-			bat_hysteresis.index = 0;
-			offset = ((*bat_voltage) *
-				chg_device->hysteresis_window_size)/
-				100;
-			bat_hysteresis.upper_limit = (*bat_voltage) + offset;
-			bat_hysteresis.lower_limit = (*bat_voltage) - offset;
+	return 0;
+}
+
+static int da9052_bat_check_status(struct da9052_battery *bat, int *status)
+{
+	u8 v[2] = {0, 0};
+	u8 bat_status;
+	u8 chg_end;
+	int ret;
+	int chg_current;
+	int chg_end_current;
+	bool dcinsel;
+	bool dcindet;
+	bool vbussel;
+	bool vbusdet;
+	bool dc;
+	bool vbus;
+
+	ret = da9052_group_read(bat->da9052, DA9052_STATUS_A_REG, 2, v);
+	if (ret < 0)
+		return ret;
+
+	bat_status = v[0];
+	chg_end = v[1];
+
+	dcinsel = bat_status & DA9052_STATUSA_DCINSEL;
+	dcindet = bat_status & DA9052_STATUSA_DCINDET;
+	vbussel = bat_status & DA9052_STATUSA_VBUSSEL;
+	vbusdet = bat_status & DA9052_STATUSA_VBUSDET;
+	dc = dcinsel && dcindet;
+	vbus = vbussel && vbusdet;
+
+	/* Preference to WALL(DCIN) charger unit */
+	if (dc || vbus) {
+		bat->charger_type = DA9052_CHARGER;
+
+		/* If charging end flag is set and Charging current is greater
+		 * than charging end limit then battery is charging
+		*/
+		if ((chg_end & DA9052_STATUSB_CHGEND) != 0) {
+			ret = da9052_read_chg_current(bat, &chg_current);
+			if (ret < 0)
+				return ret;
+			ret = da9052_read_chgend_current(bat, &chg_end_current);
+			if (ret < 0)
+				return ret;
+
+			if (chg_current >= chg_end_current)
+				bat->status = POWER_SUPPLY_STATUS_CHARGING;
+			else
+				bat->status = POWER_SUPPLY_STATUS_NOT_CHARGING;
 		} else {
-#if DA9052_BAT_FILTER_HYS
-			printk(KERN_CRIT "CheckHystersis: Failed\n");
-#endif
-			return -EIO;
+			/* If Charging end flag is cleared then battery is
+			 * charging
+			*/
+			bat->status = POWER_SUPPLY_STATUS_CHARGING;
 		}
+	} else if (dcindet || vbusdet) {
+			bat->charger_type = DA9052_CHARGER;
+			bat->status = POWER_SUPPLY_STATUS_NOT_CHARGING;
 	} else {
-		bat_hysteresis.index = 0;
-		offset = ((*bat_voltage) *
-			chg_device->hysteresis_window_size)/100;
-		bat_hysteresis.upper_limit = (*bat_voltage) + offset;
-		bat_hysteresis.lower_limit = (*bat_voltage) - offset;
+		bat->charger_type = DA9052_NOCHARGER;
+		bat->status = POWER_SUPPLY_STATUS_DISCHARGING;
 	}
 
-	/* Digital C Filter, formula Yn = k Yn-1 + (1-k) Xn */
-	*bat_voltage = ((chg_device->chg_hysteresis_const *
-		array_hys_batvoltage[0])/100) +
-		(((100 - chg_device->chg_hysteresis_const) *
-		array_hys_batvoltage[1])/100);
-
-	if ((chg_device->status == POWER_SUPPLY_STATUS_DISCHARGING) &&
-		(*bat_voltage > array_hys_batvoltage[0])) {
-			*bat_voltage = array_hys_batvoltage[0];
-	}
-
-	array_hys_batvoltage[0] = *bat_voltage;
-
-#if DA9052_BAT_FILTER_HYS
-	printk(KERN_CRIT "\nBAT_LOG:Battery Voltage After Filter = %d mV\n",\
-		*bat_voltage);
-	
-#endif
+	if (status != NULL)
+		*status = bat->status;
 	return 0;
 }
 
-u8 select_temperature(u8 temp_index, u16 bat_temperature)
+static int da9052_bat_read_volt(struct da9052_battery *bat, int *volt_mV)
 {
-	u16 temp_temperature = 0;
-	temp_temperature = (temperature_lookup_ref[temp_index] +
-				temperature_lookup_ref[temp_index+1]) / 2;
+	int volt;
 
-	if (bat_temperature >= temp_temperature) {
-		temp_index += 1;
-		return temp_index;
-	} else
-		return temp_index;
+	volt = da9052_adc_manual_read(bat->da9052, DA9052_ADC_MAN_MUXSEL_VBAT);
+	if (volt < 0)
+		return volt;
+
+	*volt_mV = volt_reg_to_mV(volt);
+
+	return 0;
 }
 
-s32 da9052_bat_level_update(struct da9052_charger_device *chg_device)
+static int da9052_bat_check_presence(struct da9052_battery *bat, int *illegal)
 {
-	u16 bat_temperature;
-	u16 bat_voltage;
-	u32 vbat_lower, vbat_upper, level_upper, level_lower, level;
-	u8 access_index = 0;
-	u8 index = 0, ret;
-	u8 flag = FALSE;
+	int bat_temp;
 
-	ret = 0;
-	vbat_lower = 0;
-	vbat_upper = 0;
-	level_upper = 0;
-	level_lower = 0;
+	bat_temp = da9052_adc_read_temp(bat->da9052);
+	if (bat_temp < 0)
+		return bat_temp;
 
-	ret = check_hystersis(chg_device, &bat_voltage);
-	if (ret)
-		return ret;
+	if (bat_temp > DA9052_BAT_TSH)
+		*illegal = 1;
+	else
+		*illegal = 0;
 
-	ret = da9052_bat_get_battery_temperature(chg_device,
-		&bat_temperature);
-	if (ret)
-		return ret;
+	return 0;
+}
 
-	for (index = 0; index < (DA9052_NO_OF_LOOKUP_TABLE-1); index++) {
-		if (bat_temperature <= temperature_lookup_ref[0]) {
-			access_index = 0;
-			break;
-		} else if (bat_temperature >
-			temperature_lookup_ref[DA9052_NO_OF_LOOKUP_TABLE]){
-				access_index = DA9052_NO_OF_LOOKUP_TABLE - 1;
-			break;
-		} else if ((bat_temperature >= temperature_lookup_ref[index]) &&
-			(bat_temperature >= temperature_lookup_ref[index+1])) {
-			access_index = select_temperature(index,
-				bat_temperature);
-			break;
-		}
+static int da9052_bat_interpolate(int vbat_lower, int  vbat_upper,
+				   int level_lower, int level_upper,
+				   int bat_voltage)
+{
+	int tmp;
+
+	tmp = ((level_upper - level_lower) * 1000) / (vbat_upper - vbat_lower);
+	tmp = level_lower + (((bat_voltage - vbat_lower) * tmp) / 1000);
+
+	return tmp;
+}
+
+static unsigned char da9052_determine_vc_tbl_index(unsigned char adc_temp)
+{
+	int i;
+
+	if (adc_temp <= vc_tbl_ref[0])
+		return 0;
+
+	if (adc_temp > vc_tbl_ref[DA9052_VC_TBL_REF_SZ - 1])
+		return DA9052_VC_TBL_REF_SZ - 1;
+
+	for (i = 0; i < DA9052_VC_TBL_REF_SZ - 1; i++) {
+		if ((adc_temp > vc_tbl_ref[i]) &&
+		    (adc_temp <= DA9052_MEAN(vc_tbl_ref[i], vc_tbl_ref[i + 1])))
+				return i;
+		if ((adc_temp > DA9052_MEAN(vc_tbl_ref[i], vc_tbl_ref[i + 1]))
+		     && (adc_temp <= vc_tbl_ref[i]))
+				return i + 1;
 	}
-	if (bat_voltage >= vbat_vs_capacity_look_up[access_index][0][0]) {
-		chg_device->cal_capacity = 100;
+	/*
+	 * For some reason authors of the driver didn't presume that we can
+	 * end up here. It might be OK, but might be not, no one knows for
+	 * sure. Go check your battery, is it on fire?
+	 */
+	WARN_ON(1);
+	return 0;
+}
+
+static int da9052_bat_read_capacity(struct da9052_battery *bat, int *capacity)
+{
+	int adc_temp;
+	int bat_voltage;
+	int vbat_lower;
+	int vbat_upper;
+	int level_upper;
+	int level_lower;
+	int ret;
+	int flag;
+	int i = 0;
+	int j;
+
+	ret = da9052_bat_read_volt(bat, &bat_voltage);
+	if (ret < 0)
+		return ret;
+
+	adc_temp = da9052_adc_read_temp(bat->da9052);
+	if (adc_temp < 0)
+		return adc_temp;
+
+	i = da9052_determine_vc_tbl_index(adc_temp);
+
+	if (bat_voltage >= vc_tbl[i][0][0]) {
+		*capacity = 100;
 		return 0;
 	}
-	if (bat_voltage <= vbat_vs_capacity_look_up[access_index]
-		[DA9052_LOOK_UP_TABLE_SIZE-1][0]){
-			chg_device->cal_capacity = 0;
-			return 0;
+	if (bat_voltage <= vc_tbl[i][DA9052_VC_TBL_SZ - 1][0]) {
+		*capacity = 0;
+		return 0;
 	}
-	flag = FALSE;
+	flag = 0;
 
-	for (index = 0; index < (DA9052_LOOK_UP_TABLE_SIZE-1); index++) {
-		if ((bat_voltage <=
-		vbat_vs_capacity_look_up[access_index][index][0]) &&
-		(bat_voltage >=
-		vbat_vs_capacity_look_up[access_index][index+1][0])) {
-			vbat_upper =
-			vbat_vs_capacity_look_up[access_index][index][0];
-			vbat_lower =
-			vbat_vs_capacity_look_up[access_index][index+1][0];
-			level_upper =
-			vbat_vs_capacity_look_up[access_index][index][1];
-			level_lower =
-			vbat_vs_capacity_look_up[access_index][index+1][1];
-			flag = TRUE;
+	for (j = 0; j < (DA9052_VC_TBL_SZ-1); j++) {
+		if ((bat_voltage <= vc_tbl[i][j][0]) &&
+		    (bat_voltage >= vc_tbl[i][j + 1][0])) {
+			vbat_upper = vc_tbl[i][j][0];
+			vbat_lower = vc_tbl[i][j + 1][0];
+			level_upper = vc_tbl[i][j][1];
+			level_lower = vc_tbl[i][j + 1][1];
+			flag = 1;
 			break;
 		}
 	}
 	if (!flag)
 		return -EIO;
 
-	level = interpolated(vbat_lower, vbat_upper, level_lower,
-		level_upper, bat_voltage);
-	chg_device->cal_capacity = level;
-	DA9052_DEBUG(" TOTAl_BAT_CAPACITY : %d\n", chg_device->cal_capacity);
+	*capacity = da9052_bat_interpolate(vbat_lower, vbat_upper, level_lower,
+					   level_upper, bat_voltage);
+
 	return 0;
 }
 
-void da9052_bat_tbat_handler(struct da9052_eh_nb *eh_data, unsigned int event)
+static int da9052_bat_check_health(struct da9052_battery *bat, int *health)
 {
-	struct da9052_charger_device *chg_device =
-	container_of(eh_data, struct da9052_charger_device, tbat_eh_data);
-	
-	chg_device->health = POWER_SUPPLY_HEALTH_OVERHEAT;
-	
-}
+	int ret;
+	int bat_illegal;
+	int capacity;
 
-static s32 da9052_bat_register_event(struct da9052_charger_device *chg_device)
-{
-	s32 ret;
-	
-	if (event_status.da9052_event_tbat == FALSE) {
-		chg_device->tbat_eh_data.eve_type = TBAT_EVE;
-		chg_device->tbat_eh_data.call_back =da9052_bat_tbat_handler;
-		DA9052_DEBUG("events = %d\n",TBAT_EVE);
-		ret = chg_device->da9052->register_event_notifier
-			(chg_device->da9052, &chg_device->tbat_eh_data);
-		if (ret)
-			return -EIO;
-		event_status.da9052_event_tbat = TRUE;
+	ret = da9052_bat_check_presence(bat, &bat_illegal);
+	if (ret < 0)
+		return ret;
+
+	if (bat_illegal) {
+		bat->health = POWER_SUPPLY_HEALTH_UNKNOWN;
+		return 0;
 	}
-	
+
+	if (bat->health != POWER_SUPPLY_HEALTH_OVERHEAT) {
+		ret = da9052_bat_read_capacity(bat, &capacity);
+		if (ret < 0)
+			return ret;
+		if (capacity < DA9052_BAT_LOW_CAP)
+			bat->health = POWER_SUPPLY_HEALTH_DEAD;
+		else
+			bat->health = POWER_SUPPLY_HEALTH_GOOD;
+	}
+
+	*health = bat->health;
+
 	return 0;
 }
 
-static s32 da9052_bat_unregister_event(struct da9052_charger_device *chg_device)
+static irqreturn_t da9052_bat_irq(int irq, void *data)
 {
-	s32 ret;
-	
-	if (event_status.da9052_event_tbat) {
-		ret =
-			chg_device->da9052->unregister_event_notifier
-				(chg_device->da9052, &chg_device->tbat_eh_data);
-		if (ret)
-			return -EIO;
-		event_status.da9052_event_tbat = FALSE;
+	struct da9052_battery *bat = data;
+	int virq;
+
+	virq = regmap_irq_get_virq(bat->da9052->irq_data, irq);
+	irq -= virq;
+
+	if (irq == DA9052_IRQ_CHGEND)
+		bat->status = POWER_SUPPLY_STATUS_FULL;
+	else
+		da9052_bat_check_status(bat, NULL);
+
+	if (irq == DA9052_IRQ_CHGEND || irq == DA9052_IRQ_DCIN ||
+	    irq == DA9052_IRQ_VBUS || irq == DA9052_IRQ_TBAT) {
+		power_supply_changed(&bat->psy);
 	}
-	
-	return 0;
+
+	return IRQ_HANDLED;
+}
+
+static int da9052_USB_current_notifier(struct notifier_block *nb,
+					unsigned long events, void *data)
+{
+	u8 row;
+	u8 col;
+	int *current_mA = data;
+	int ret;
+	struct da9052_battery *bat = container_of(nb, struct da9052_battery,
+						  nb);
+
+	if (bat->status == POWER_SUPPLY_STATUS_DISCHARGING)
+		return -EPERM;
+
+	ret = da9052_reg_read(bat->da9052, DA9052_CHGBUCK_REG);
+	if (ret & DA9052_CHG_USB_ILIM_MASK)
+		return -EPERM;
+
+	if (bat->da9052->chip_id == DA9052)
+		row = 0;
+	else
+		row = 1;
+
+	if (*current_mA < da9052_chg_current_lim[row][0] ||
+	    *current_mA > da9052_chg_current_lim[row][DA9052_CHG_LIM_COLS - 1])
+		return -EINVAL;
+
+	for (col = 0; col <= DA9052_CHG_LIM_COLS - 1 ; col++) {
+		if (*current_mA <= da9052_chg_current_lim[row][col])
+			break;
+	}
+
+	return da9052_reg_update(bat->da9052, DA9052_ISET_REG,
+				 DA9052_ISET_USB_MASK, col);
 }
 
 static int da9052_bat_get_property(struct power_supply *psy,
-				enum power_supply_property psp,
-				union power_supply_propval *val)
+				    enum power_supply_property psp,
+				    union power_supply_propval *val)
 {
-	struct da9052_charger_device *chg_device =
-	container_of(psy, struct da9052_charger_device, psy);
+	int ret;
+	int illegal;
+	struct da9052_battery *bat = container_of(psy, struct da9052_battery,
+						  psy);
 
-	/* Validate battery presence */ 
-	if( chg_device->illegal &&  psp != POWER_SUPPLY_PROP_PRESENT  ) {
+	ret = da9052_bat_check_presence(bat, &illegal);
+	if (ret < 0)
+		return ret;
+
+	if (illegal && psp != POWER_SUPPLY_PROP_PRESENT)
 		return -ENODEV;
-	}
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
-		val->intval = chg_device->status;
+		ret = da9052_bat_check_status(bat, &val->intval);
 		break;
 	case POWER_SUPPLY_PROP_ONLINE:
-		val->intval = (chg_device->charger_type == DA9052_NOCHARGER) ? 0: 1;
+		val->intval =
+			(bat->charger_type == DA9052_NOCHARGER) ? 0 : 1;
 		break;
 	case POWER_SUPPLY_PROP_PRESENT:
-		val->intval = chg_device->illegal;
+		ret = da9052_bat_check_presence(bat, &val->intval);
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
-		val->intval = chg_device->health;
-		break;
-	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
-		val->intval = chg_device->bat_target_voltage * 1000;
+		ret = da9052_bat_check_health(bat, &val->intval);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
-		val->intval = chg_device->bat_volt_cutoff * 1000;
+		val->intval = DA9052_BAT_CUTOFF_VOLT * 1000;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_AVG:
-		val->intval = chg_device->bat_voltage * 1000;
+		ret = da9052_bat_read_volt(bat, &val->intval);
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_AVG:
-		val->intval = chg_device->chg_current * 1000;
+		ret = da9052_read_chg_current(bat, &val->intval);
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
-		val->intval = chg_device->cal_capacity;
+		ret = da9052_bat_read_capacity(bat, &val->intval);
 		break;
 	case POWER_SUPPLY_PROP_TEMP:
-		val->intval = bat_temp_reg_to_C(chg_device->bat_temp);
+		val->intval = da9052_adc_read_temp(bat->da9052);
+		ret = val->intval;
 		break;
 	case POWER_SUPPLY_PROP_TECHNOLOGY:
-		val->intval = chg_device->technology;
+		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
 		break;
 	default:
 		return -EINVAL;
-	break;
 	}
-	return 0;
-}
-
-
-static u8 detect_illegal_battery(struct da9052_charger_device *chg_device)
-{
-	u16 buffer = 0;
-	s32  ret = 0;
-
-	/* Measure battery temeperature */
-	ret = da9052_bat_get_battery_temperature(chg_device, &buffer);
-	if (ret) {
-		DA9052_DEBUG("%s: Battery temperature measurement failed \n",
-		__func__);
-		return ret;
-	}
-
-	if (buffer > chg_device->bat_with_no_resistor)
-		chg_device->illegal = TRUE;
-	else
-		chg_device->illegal = FALSE;
-
-
-	/* suspend charging of battery if illegal battey is detected */
-	if (chg_device->illegal)
-		da9052_bat_suspend_charging(chg_device);
-
-	return chg_device->illegal;
-}
-
-void da9052_update_bat_properties(struct da9052_charger_device *chg_device)
-{
-	/* Get Bat status and type */
-	da9052_bat_status_update(chg_device);
-	da9052_bat_level_update(chg_device);
-}
-
-static void da9052_bat_external_power_changed(struct power_supply *psy)
-{
-	struct da9052_charger_device *chg_device =
-	container_of(psy, struct da9052_charger_device, psy);
-
-	cancel_delayed_work(&chg_device->monitor_work);
-	queue_delayed_work(chg_device->monitor_wqueue, &chg_device->monitor_work, HZ/10);
-}
-
-
-static void da9052_bat_work(struct work_struct *work) 
-{
-	struct da9052_charger_device *chg_device = container_of(work,
-		struct da9052_charger_device,monitor_work.work);
-		
-	da9052_update_bat_properties(chg_device);
-	queue_delayed_work(chg_device->monitor_wqueue, &chg_device->monitor_work, HZ * 8);
+	return ret;
 }
 
 static enum power_supply_property da9052_bat_props[] = {
@@ -714,131 +553,115 @@ static enum power_supply_property da9052_bat_props[] = {
 	POWER_SUPPLY_PROP_ONLINE,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_HEALTH,
-	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
 	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
 	POWER_SUPPLY_PROP_VOLTAGE_AVG,
 	POWER_SUPPLY_PROP_CURRENT_AVG,
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
-	
 };
 
-static s32 __devinit da9052_bat_probe(struct platform_device *pdev)
-{
-	struct da9052_charger_device *chg_device;
-	u8 reg_data;
-	int ret;
+static struct power_supply template_battery = {
+	.name		= "da9052-bat",
+	.type		= POWER_SUPPLY_TYPE_BATTERY,
+	.properties	= da9052_bat_props,
+	.num_properties	= ARRAY_SIZE(da9052_bat_props),
+	.get_property	= da9052_bat_get_property,
+};
 
-	chg_device = kzalloc(sizeof(*chg_device), GFP_KERNEL);
-	if (!chg_device)
+static char *da9052_bat_irqs[] = {
+	"BATT TEMP",
+	"DCIN DET",
+	"DCIN REM",
+	"VBUS DET",
+	"VBUS REM",
+	"CHG END",
+};
+
+static int da9052_bat_irq_bits[] = {
+	DA9052_IRQ_TBAT,
+	DA9052_IRQ_DCIN,
+	DA9052_IRQ_DCINREM,
+	DA9052_IRQ_VBUS,
+	DA9052_IRQ_VBUSREM,
+	DA9052_IRQ_CHGEND,
+};
+
+static s32 da9052_bat_probe(struct platform_device *pdev)
+{
+	struct da9052_pdata *pdata;
+	struct da9052_battery *bat;
+	int ret;
+	int i;
+
+	bat = devm_kzalloc(&pdev->dev, sizeof(struct da9052_battery),
+				GFP_KERNEL);
+	if (!bat)
 		return -ENOMEM;
 
-	chg_device->da9052 = dev_get_drvdata(pdev->dev.parent);
-	platform_set_drvdata(pdev, chg_device);
-	
-	chg_device->psy.name			= DA9052_BAT_DEVICE_NAME;
-	chg_device->psy.type			= POWER_SUPPLY_TYPE_BATTERY;
-	chg_device->psy.properties 		= da9052_bat_props;
-	chg_device->psy.num_properties 		= ARRAY_SIZE(da9052_bat_props);
-	chg_device->psy.get_property 		= da9052_bat_get_property;
-	chg_device->psy.external_power_changed 	= da9052_bat_external_power_changed;
-	chg_device->psy.use_for_apm 		= 1;
-	chg_device->charger_type 		= DA9052_NOCHARGER;
-	chg_device->status 			= POWER_SUPPLY_STATUS_UNKNOWN;
-	chg_device->health 			= POWER_SUPPLY_HEALTH_UNKNOWN;
-	chg_device->technology 			= POWER_SUPPLY_TECHNOLOGY_LION;
-	chg_device->bat_with_no_resistor 	= 62;
-	chg_device->bat_capacity_limit_low 	= 4;
-	chg_device->bat_capacity_limit_high 	= 70;
-	chg_device->bat_capacity_full 		= 100;
-	chg_device->bat_volt_cutoff 		= 2800;
-	chg_device->vbat_first_valid_detect_iteration = 3;
-	chg_device->hysteresis_window_size	=1;
-	chg_device->chg_hysteresis_const	=89;
-	chg_device->hysteresis_reading_interval	=1000;
-	chg_device->hysteresis_no_of_reading	=10;
+	bat->da9052 = dev_get_drvdata(pdev->dev.parent);
+	bat->psy = template_battery;
+	bat->charger_type = DA9052_NOCHARGER;
+	bat->status = POWER_SUPPLY_STATUS_UNKNOWN;
+	bat->health = POWER_SUPPLY_HEALTH_UNKNOWN;
+	bat->nb.notifier_call = da9052_USB_current_notifier;
 
-	ret = da9052_read(chg_device->da9052, DA9052_CHGCONT_REG, &reg_data);
-	if (ret)
-		goto err_charger_init;
-	chg_device->charger_voltage_drop = bat_drop_reg_to_mV(reg_data &&
-							DA9052_CHGCONT_TCTR);
-	chg_device->bat_target_voltage =
-			bat_reg_to_mV(reg_data && DA9052_CHGCONT_VCHGBAT);
-	
-	ret = da9052_read(chg_device->da9052, DA9052_ICHGEND_REG, &reg_data);
-	if (ret)
-		goto err_charger_init;
-	chg_device->chg_end_current = ichg_reg_to_mA(reg_data);
-	
-	bat_hysteresis.upper_limit 	= 0;
-	bat_hysteresis.lower_limit 	= 0;
-	bat_hysteresis.hys_flag 	= 0;
+	pdata = bat->da9052->dev->platform_data;
+	if (pdata != NULL && pdata->use_for_apm)
+		bat->psy.use_for_apm = pdata->use_for_apm;
+	else
+		bat->psy.use_for_apm = 1;
 
-	chg_device->illegal 		= FALSE;
-	detect_illegal_battery(chg_device);
+	for (i = 0; i < ARRAY_SIZE(da9052_bat_irqs); i++) {
+		ret = da9052_request_irq(bat->da9052,
+				da9052_bat_irq_bits[i], da9052_bat_irqs[i],
+				da9052_bat_irq, bat);
 
-	da9052_bat_register_event(chg_device);
-	if (ret)
-		goto err_charger_init;
-	
-	ret = power_supply_register(&pdev->dev, &chg_device->psy);
-	 if (ret)
-		goto err_charger_init;
-	
-	INIT_DELAYED_WORK(&chg_device->monitor_work, da9052_bat_work);
-	chg_device->monitor_wqueue = create_singlethread_workqueue(pdev->dev.bus_id);
-	if (!chg_device->monitor_wqueue) {
-		goto err_charger_init;
+		if (ret != 0) {
+			dev_err(bat->da9052->dev,
+				"DA9052 failed to request %s IRQ: %d\n",
+				da9052_bat_irqs[i], ret);
+			goto err;
+		}
 	}
-	queue_delayed_work(chg_device->monitor_wqueue, &chg_device->monitor_work, HZ * 1);
-	
+
+	ret = power_supply_register(&pdev->dev, &bat->psy);
+	 if (ret)
+		goto err;
+
+	platform_set_drvdata(pdev, bat);
 	return 0;
 
-err_charger_init:
-	platform_set_drvdata(pdev, NULL);
-	kfree(chg_device);
+err:
+	while (--i >= 0)
+		da9052_free_irq(bat->da9052, da9052_bat_irq_bits[i], bat);
+
 	return ret;
 }
-static int __devexit da9052_bat_remove(struct platform_device *dev)
+static int da9052_bat_remove(struct platform_device *pdev)
 {
-	struct da9052_charger_device *chg_device = platform_get_drvdata(dev);
-	
-	/* unregister the events.*/
-	da9052_bat_unregister_event(chg_device);
-	
-	cancel_rearming_delayed_workqueue(chg_device->monitor_wqueue,
-					  &chg_device->monitor_work);
-	destroy_workqueue(chg_device->monitor_wqueue);
-	
-	power_supply_unregister(&chg_device->psy);
-	
+	int i;
+	struct da9052_battery *bat = platform_get_drvdata(pdev);
+
+	for (i = 0; i < ARRAY_SIZE(da9052_bat_irqs); i++)
+		da9052_free_irq(bat->da9052, da9052_bat_irq_bits[i], bat);
+
+	power_supply_unregister(&bat->psy);
+
 	return 0;
 }
 
 static struct platform_driver da9052_bat_driver = {
-	.probe		= da9052_bat_probe,
-	.remove		= __devexit_p(da9052_bat_remove),
-	.driver.name	= DA9052_BAT_DEVICE_NAME,
-	.driver.owner	= THIS_MODULE,
+	.probe = da9052_bat_probe,
+	.remove = da9052_bat_remove,
+	.driver = {
+		.name = "da9052-bat",
+		.owner = THIS_MODULE,
+	},
 };
+module_platform_driver(da9052_bat_driver);
 
-static int __init da9052_bat_init(void)
-{
-	printk(banner);
-	return platform_driver_register(&da9052_bat_driver);
-}
-
-static void __exit da9052_bat_exit(void)
-{
-	// To remove printk("DA9052: Unregistering BAT device.\n");
-	platform_driver_unregister(&da9052_bat_driver);
-}
-
-module_init(da9052_bat_init);
-module_exit(da9052_bat_exit);
-
-MODULE_AUTHOR("Dialog Semiconductor Ltd");
 MODULE_DESCRIPTION("DA9052 BAT Device Driver");
+MODULE_AUTHOR("David Dajun Chen <dchen@diasemi.com>");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:da9052-bat");

@@ -2927,7 +2927,7 @@ int ocfs2_duplicate_clusters_by_page(handle_t *handle,
 				     u32 new_cluster, u32 new_len)
 {
 	int ret = 0, partial;
-	struct inode *inode = file->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	struct ocfs2_caching_info *ci = INODE_CACHE(inode);
 	struct super_block *sb = ocfs2_metadata_cache_get_super(ci);
 	u64 new_block = ocfs2_clusters_to_blocks(sb, new_cluster);
@@ -3020,7 +3020,7 @@ int ocfs2_duplicate_clusters_by_jbd(handle_t *handle,
 				    u32 new_cluster, u32 new_len)
 {
 	int ret = 0;
-	struct inode *inode = file->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
 	struct ocfs2_caching_info *ci = INODE_CACHE(inode);
 	int i, blocks = ocfs2_clusters_to_blocks(sb, new_len);
@@ -4368,25 +4368,6 @@ static inline int ocfs2_may_create(struct inode *dir, struct dentry *child)
 	return inode_permission(dir, MAY_WRITE | MAY_EXEC);
 }
 
-/* copied from user_path_parent. */
-static int ocfs2_user_path_parent(const char __user *path,
-				  struct nameidata *nd, char **name)
-{
-	char *s = getname(path);
-	int error;
-
-	if (IS_ERR(s))
-		return PTR_ERR(s);
-
-	error = kern_path_parent(s, nd);
-	if (error)
-		putname(s);
-	else
-		*name = s;
-
-	return error;
-}
-
 /**
  * ocfs2_vfs_reflink - Create a reference-counted link
  *
@@ -4426,7 +4407,7 @@ static int ocfs2_vfs_reflink(struct dentry *old_dentry, struct inode *dir,
 	 * rights to do so.
 	 */
 	if (preserve) {
-		if ((current_fsuid() != inode->i_uid) && !capable(CAP_CHOWN))
+		if (!uid_eq(current_fsuid(), inode->i_uid) && !capable(CAP_CHOWN))
 			return -EPERM;
 		if (!in_group_p(inode->i_gid) && !capable(CAP_CHOWN))
 			return -EPERM;
@@ -4460,10 +4441,8 @@ int ocfs2_reflink_ioctl(struct inode *inode,
 			bool preserve)
 {
 	struct dentry *new_dentry;
-	struct nameidata nd;
-	struct path old_path;
+	struct path old_path, new_path;
 	int error;
-	char *to = NULL;
 
 	if (!ocfs2_refcount_tree(OCFS2_SB(inode->i_sb)))
 		return -EOPNOTSUPP;
@@ -4474,39 +4453,24 @@ int ocfs2_reflink_ioctl(struct inode *inode,
 		return error;
 	}
 
-	error = ocfs2_user_path_parent(newname, &nd, &to);
-	if (error) {
+	new_dentry = user_path_create(AT_FDCWD, newname, &new_path, 0);
+	error = PTR_ERR(new_dentry);
+	if (IS_ERR(new_dentry)) {
 		mlog_errno(error);
 		goto out;
 	}
 
 	error = -EXDEV;
-	if (old_path.mnt != nd.path.mnt)
-		goto out_release;
-	new_dentry = lookup_create(&nd, 0);
-	error = PTR_ERR(new_dentry);
-	if (IS_ERR(new_dentry)) {
-		mlog_errno(error);
-		goto out_unlock;
-	}
-
-	error = mnt_want_write(nd.path.mnt);
-	if (error) {
+	if (old_path.mnt != new_path.mnt) {
 		mlog_errno(error);
 		goto out_dput;
 	}
 
 	error = ocfs2_vfs_reflink(old_path.dentry,
-				  nd.path.dentry->d_inode,
+				  new_path.dentry->d_inode,
 				  new_dentry, preserve);
-	mnt_drop_write(nd.path.mnt);
 out_dput:
-	dput(new_dentry);
-out_unlock:
-	mutex_unlock(&nd.path.dentry->d_inode->i_mutex);
-out_release:
-	path_put(&nd.path);
-	putname(to);
+	done_path_create(&new_path, new_dentry);
 out:
 	path_put(&old_path);
 

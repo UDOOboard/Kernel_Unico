@@ -102,6 +102,8 @@
 #include <linux/nmi.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
+#include <linux/module.h>
+#include <asm/sections.h>
 
 #define v1printk(a...) do { \
 	if (verbose) \
@@ -221,6 +223,7 @@ static unsigned long lookup_addr(char *arg)
 		addr = (unsigned long)do_fork;
 	else if (!strcmp(arg, "hw_break_val"))
 		addr = (unsigned long)&hw_break_val;
+	addr = (unsigned long) dereference_function_descriptor((void *)addr);
 	return addr;
 }
 

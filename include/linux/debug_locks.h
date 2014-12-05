@@ -2,8 +2,8 @@
 #define __LINUX_DEBUG_LOCKING_H
 
 #include <linux/kernel.h>
-#include <asm/atomic.h>
-#include <asm/system.h>
+#include <linux/atomic.h>
+#include <linux/bug.h>
 
 struct task_struct;
 
@@ -27,7 +27,7 @@ extern int debug_locks_off(void);
 									\
 	if (!oops_in_progress && unlikely(c)) {				\
 		if (debug_locks_off() && !debug_locks_silent)		\
-			WARN_ON(1);					\
+			WARN(1, "DEBUG_LOCKS_WARN_ON(%s)", #c);		\
 		__ret = 1;						\
 	}								\
 	__ret;								\

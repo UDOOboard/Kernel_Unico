@@ -18,17 +18,16 @@
  *
  * @ingroup IPU
  */
-#include <linux/types.h>
-#include <linux/init.h>
 #include <linux/errno.h>
-#include <linux/spinlock.h>
-#include <linux/videodev2.h>
+#include <linux/init.h>
 #include <linux/io.h>
-#include <mach/ipu-v3.h>
+#include <linux/ipu-v3.h>
+#include <linux/spinlock.h>
+#include <linux/types.h>
+#include <linux/videodev2.h>
 
-#include "ipu_prv.h"
-#include "ipu_regs.h"
 #include "ipu_param_mem.h"
+#include "ipu_regs.h"
 
 enum {
 	IC_TASK_VIEWFINDER,
@@ -698,15 +697,16 @@ int _ipu_ic_idma_init(struct ipu_soc *ipu, int dma_chan,
 static void _init_csc(struct ipu_soc *ipu, uint8_t ic_task, ipu_color_space_t in_format,
 		      ipu_color_space_t out_format, int csc_index)
 {
-
-/*     Y = R *  .299 + G *  .587 + B *  .114;
-       U = R * -.169 + G * -.332 + B *  .500 + 128.;
-       V = R *  .500 + G * -.419 + B * -.0813 + 128.;*/
+	/*
+	 * Y =  0.257 * R + 0.504 * G + 0.098 * B +  16;
+	 * U = -0.148 * R - 0.291 * G + 0.439 * B + 128;
+	 * V =  0.439 * R - 0.368 * G - 0.071 * B + 128;
+	 */
 	static const uint32_t rgb2ycbcr_coeff[4][3] = {
-		{0x004D, 0x0096, 0x001D},
-		{0x01D5, 0x01AB, 0x0080},
-		{0x0080, 0x0195, 0x01EB},
-		{0x0000, 0x0200, 0x0200},	/* A0, A1, A2 */
+		{0x0042, 0x0081, 0x0019},
+		{0x01DA, 0x01B6, 0x0070},
+		{0x0070, 0x01A2, 0x01EE},
+		{0x0040, 0x0200, 0x0200},	/* A0, A1, A2 */
 	};
 
 	/* transparent RGB->RGB matrix for combining
@@ -880,4 +880,3 @@ void _ipu_vdi_toggle_top_field_man(struct ipu_soc *ipu)
 
 	ipu_vdi_write(ipu, reg, VDI_C);
 }
-

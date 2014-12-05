@@ -1027,7 +1027,8 @@ gckVIDMEM_AllocateLinear(
     )
     {
         /* The left memory is for small memory.*/
-        gcmkONERROR(gcvSTATUS_OUT_OF_MEMORY);
+        status = gcvSTATUS_OUT_OF_MEMORY;
+        goto OnError;
     }
 #endif
 
@@ -1581,6 +1582,7 @@ _NeedVirtualMapping(
     gctUINT32 end;
     gcePOOL pool;
     gctUINT32 offset;
+    gctUINT32 baseAddress;
 
     gcmkHEADER_ARG("Node=0x%X", Node);
 
@@ -1600,10 +1602,16 @@ _NeedVirtualMapping(
         else
 #endif
         {
-            /* For cores which can't access all physical address. */
-            gcmkONERROR(gckHARDWARE_ConvertLogical(Kernel->hardware,
-                        Node->Virtual.logical,
-                        &phys));
+            /* Convert logical address into a physical address. */
+            gcmkONERROR(
+                gckOS_GetPhysicalAddress(Kernel->os, Node->Virtual.logical, &phys));
+
+            gcmkONERROR(gckOS_GetBaseAddress(Kernel->os, &baseAddress));
+
+            gcmkASSERT(phys >= baseAddress);
+
+            /* Subtract baseAddress to get a GPU address used for programming. */
+            phys -= baseAddress;
 
             /* If part of region is belong to gcvPOOL_VIRTUAL,
             ** whole region has to be mapped. */
@@ -2143,6 +2151,9 @@ gckVIDMEM_Unlock(
 
             if (!Node->Virtual.contiguous
             &&  (Node->Virtual.lockeds[Kernel->core] == 1)
+#if gcdENABLE_VG
+            && (Kernel->vg == gcvNULL)
+#endif
             )
             {
                 if (Type == gcvSURF_BITMAP)

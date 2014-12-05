@@ -1,5 +1,5 @@
 /*
- * Copyright 2005-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2005-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -12,8 +12,7 @@
  */
 #ifndef _HDMICEC_H_
 #define _HDMICEC_H_
-#include <linux/ioctl.h>	/* needed for the _IOW etc stuff used later */
-
+#include <linux/ioctl.h>
 
 /*
  * Ioctl definitions
@@ -29,9 +28,11 @@
  * X means "eXchange": G and S atomically
  * H means "sHift": T and Q atomically
  */
-#define HDMICEC_IOC_SETLOGICALADDRESS	_IOW(HDMICEC_IOC_MAGIC,  1, unsigned char)
+#define HDMICEC_IOC_SETLOGICALADDRESS  \
+				_IOW(HDMICEC_IOC_MAGIC, 1, unsigned char)
 #define HDMICEC_IOC_STARTDEVICE	_IO(HDMICEC_IOC_MAGIC,  2)
 #define HDMICEC_IOC_STOPDEVICE	_IO(HDMICEC_IOC_MAGIC,  3)
-#define HDMICEC_IOC_GETPHYADDRESS	_IOR(HDMICEC_IOC_MAGIC,  4, unsigned char[4])
+#define HDMICEC_IOC_GETPHYADDRESS	\
+				_IOR(HDMICEC_IOC_MAGIC, 4, unsigned char[4])
 
 #endif				/* !_HDMICEC_H_ */

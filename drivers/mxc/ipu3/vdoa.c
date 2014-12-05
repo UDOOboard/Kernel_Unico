@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2012-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,14 +15,15 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
-#include <linux/types.h>
-#include <linux/err.h>
-#include <linux/platform_device.h>
 #include <linux/clk.h>
-#include <linux/slab.h>
+#include <linux/err.h>
 #include <linux/io.h>
 #include <linux/ipu.h>
-#include <linux/iram_alloc.h>
+#include <linux/genalloc.h>
+#include <linux/module.h>
+#include <linux/platform_device.h>
+#include <linux/slab.h>
+#include <linux/types.h>
 
 #include "vdoa.h"
 /* 6band(3field* double buffer) * (width*2) * bandline(8)
@@ -113,9 +114,10 @@ do {									\
 struct vdoa_info {
 	int		state;
 	struct device	*dev;
-	struct clk	*clk;
+	struct clk	*vdoa_clk;
 	void __iomem	*reg_base;
-	void __iomem	*iram_base;
+	struct gen_pool	*iram_pool;
+	unsigned long	iram_base;
 	unsigned long	iram_paddr;
 	int		irq;
 	int		field;
@@ -355,7 +357,7 @@ void vdoa_get_handle(vdoa_handle_t *handle)
 	*handle = (vdoa_handle_t *)NULL;
 	CHECK_STATE(VDOA_INIT, return);
 	mutex_lock(&vdoa_lock);
-	clk_enable(vdoa->clk);
+	clk_prepare_enable(vdoa->vdoa_clk);
 	vdoa->state = VDOA_GET;
 	vdoa->field = VDOA_NULL;
 	vdoa_write_register(vdoa, VDOASRR, VDOASRR_SWRST);
@@ -372,7 +374,7 @@ void vdoa_put_handle(vdoa_handle_t *handle)
 	if (vdoa != g_vdoa)
 		BUG();
 
-	clk_disable(vdoa->clk);
+	clk_disable_unprepare(vdoa->vdoa_clk);
 	vdoa->state = VDOA_PUT;
 	*handle = (vdoa_handle_t *)NULL;
 	mutex_unlock(&vdoa_lock);
@@ -418,72 +420,75 @@ static int __init vdoa_iram_size_setup(char *options)
 }
 __setup("vdoa_iram_size=", vdoa_iram_size_setup);
 
+static const struct of_device_id imx_vdoa_dt_ids[] = {
+	{ .compatible = "fsl,imx6q-vdoa", },
+	{ /* sentinel */ }
+};
+
 static int vdoa_probe(struct platform_device *pdev)
 {
 	int ret;
 	struct vdoa_info *vdoa;
 	struct resource *res;
 	struct resource *res_irq;
-	struct device	*dev;
-	char   clk[] = "vdoa";
-
-	vdoa = kzalloc(sizeof(struct vdoa_info), GFP_KERNEL);
-	if (!vdoa) {
-		ret = -ENOMEM;
-		goto alloc_failed;
-	}
-	vdoa->dev = dev	= &pdev->dev;
+	struct device	*dev = &pdev->dev;
+	struct device_node *np = pdev->dev.of_node;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
-		dev_err(dev, "get IORESOURCE_MEM error\n");
-		ret = -ENODEV;
-		goto res_mem_failed;
-	}
-
-	res = request_mem_region(res->start, resource_size(res), pdev->name);
-	if (!res) {
-		dev_err(dev, "request mem region error\n");
-		ret = -EBUSY;
-		goto req_mem_region;
-	}
-	vdoa->reg_base = ioremap(res->start, resource_size(res));
-	if (!vdoa->reg_base) {
-		dev_err(dev, "map vdoa registers error\n");
-		ret = -EIO;
-		goto err_ioremap;
+		dev_err(dev, "can't get device resources\n");
+		return -ENOENT;
 	}
 
 	res_irq = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
 	if (!res_irq) {
 		dev_err(dev, "failed to get irq resource\n");
-		ret = -ENODEV;
-		goto err_get_irq;
+		return -ENOENT;
 	}
+
+	vdoa = devm_kzalloc(dev, sizeof(struct vdoa_info), GFP_KERNEL);
+	if (!vdoa)
+		return -ENOMEM;
+	vdoa->dev = dev;
+
+	vdoa->reg_base = devm_request_and_ioremap(&pdev->dev, res);
+	if (!vdoa->reg_base)
+		return -EBUSY;
+
 	vdoa->irq = res_irq->start;
-	ret = request_irq(vdoa->irq, vdoa_irq_handler, 0, "vdoa", vdoa);
+	ret = devm_request_irq(dev, vdoa->irq, vdoa_irq_handler, 0,
+				"vdoa", vdoa);
 	if (ret) {
-		dev_err(dev, "request vdoa interrupt failed\n");
-		ret = -EBUSY;
-		goto err_req_irq;
+		dev_err(dev, "can't claim irq %d\n", vdoa->irq);
+		return ret;
 	}
 	disable_irq(vdoa->irq);
 
-	vdoa->clk = clk_get(dev, clk);
-	if (IS_ERR(vdoa->clk)) {
+	vdoa->vdoa_clk = devm_clk_get(dev, NULL);
+	if (IS_ERR(vdoa->vdoa_clk)) {
 		dev_err(dev, "failed to get vdoa_clk\n");
-		ret = PTR_ERR(vdoa->clk);
-		goto err_clk;
+		return PTR_ERR(vdoa->vdoa_clk);
 	}
+
+	vdoa->iram_pool = of_get_named_gen_pool(np, "iram", 0);
+	if (!vdoa->iram_pool) {
+		dev_err(&pdev->dev, "iram pool not available\n");
+		return -ENOMEM;
+	}
+
 	if ((iram_size == 0) || (iram_size > MAX_VDOA_IRAM_SIZE))
 		iram_size = VDOA_IRAM_SIZE;
-	vdoa->iram_base = iram_alloc(iram_size, &vdoa->iram_paddr);
+
+	vdoa->iram_base = gen_pool_alloc(vdoa->iram_pool, iram_size);
 	if (!vdoa->iram_base) {
-		dev_err(dev, "failed to get iram memory:0x%lx\n", iram_size);
-		ret = -ENOMEM;
-		goto err_iram_alloc;
+		dev_err(&pdev->dev, "unable to alloc iram\n");
+		return -ENOMEM;
 	}
-	dev_dbg(dev, "iram_base:0x%p,iram_paddr:0x%lx,size:0x%lx\n",
+
+	vdoa->iram_paddr = gen_pool_virt_to_phys(vdoa->iram_pool,
+						 vdoa->iram_base);
+
+	dev_dbg(dev, "iram_base:0x%lx,iram_paddr:0x%lx,size:0x%lx\n",
 		 vdoa->iram_base, vdoa->iram_paddr, iram_size);
 
 	vdoa->state = VDOA_INIT;
@@ -491,52 +496,26 @@ static int vdoa_probe(struct platform_device *pdev)
 	g_vdoa = vdoa;
 	dev_info(dev, "i.MX Video Data Order Adapter(VDOA) driver probed\n");
 	return 0;
-
-err_iram_alloc:
-	clk_put(vdoa->clk);
-err_clk:
-err_req_irq:
-err_get_irq:
-	iounmap(vdoa->reg_base);
-err_ioremap:
-	release_mem_region(res->start, resource_size(res));
-req_mem_region:
-res_mem_failed:
-	kfree(vdoa);
-alloc_failed:
-	return ret;
 }
 
-static int __devexit vdoa_remove(struct platform_device *pdev)
+static int vdoa_remove(struct platform_device *pdev)
 {
-	int ret = 0;
-	struct resource *res;
 	struct vdoa_info *vdoa = dev_get_drvdata(&pdev->dev);
 
-	clk_put(vdoa->clk);
-	clk_disable(vdoa->clk);
-	iram_free(vdoa->iram_paddr, iram_size);
-	iounmap(vdoa->reg_base);
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(&pdev->dev, "get IORESOURCE_MEM error\n");
-		ret = -ENODEV;
-		goto res_mem_failed;
-	}
-	release_mem_region(res->start, resource_size(res));
+	gen_pool_free(vdoa->iram_pool, vdoa->iram_base, iram_size);
 	kfree(vdoa);
 	dev_set_drvdata(&pdev->dev, NULL);
 
-res_mem_failed:
-	return ret;
+	return 0;
 }
 
 static struct platform_driver vdoa_driver = {
 	.driver = {
-		   .name = "mxc_vdoa",
+		.name = "mxc_vdoa",
+		.of_match_table = imx_vdoa_dt_ids,
 	},
 	.probe = vdoa_probe,
-	.remove = __devexit_p(vdoa_remove),
+	.remove = vdoa_remove,
 };
 
 static int __init vdoa_init(void)

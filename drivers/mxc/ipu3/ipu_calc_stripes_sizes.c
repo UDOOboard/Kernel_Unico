@@ -19,8 +19,8 @@
  * @ingroup IPU
  */
 
+#include <linux/ipu-v3.h>
 #include <linux/module.h>
-#include <mach/ipu-v3.h>
 #include <linux/math64.h>
 
 #define BPP_32 0

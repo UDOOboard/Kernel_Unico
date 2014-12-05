@@ -18,30 +18,32 @@
  *
  * @ingroup IPU
  */
-#include <linux/types.h>
-#include <linux/init.h>
-#include <linux/platform_device.h>
-#include <linux/err.h>
-#include <linux/spinlock.h>
-#include <linux/delay.h>
 #include <linux/clk.h>
+#include <linux/cpumask.h>
+#include <linux/delay.h>
+#include <linux/dma-mapping.h>
+#include <linux/err.h>
+#include <linux/init.h>
+#include <linux/io.h>
+#include <linux/ipu-v3.h>
+#include <linux/kthread.h>
+#include <linux/module.h>
+#include <linux/platform_device.h>
 #include <linux/poll.h>
 #include <linux/sched.h>
-#include <linux/time.h>
-#include <linux/wait.h>
+#include <linux/sched/rt.h>
 #include <linux/slab.h>
-#include <linux/dma-mapping.h>
-#include <linux/io.h>
-#include <linux/kthread.h>
+#include <linux/spinlock.h>
+#include <linux/time.h>
+#include <linux/types.h>
 #include <linux/vmalloc.h>
-#include <linux/cpumask.h>
-#include <mach/ipu-v3.h>
-#include <asm/outercache.h>
-#include <asm/cacheflush.h>
+#include <linux/wait.h>
 
-#include "ipu_prv.h"
-#include "ipu_regs.h"
+#include <asm/cacheflush.h>
+#include <asm/outercache.h>
+
 #include "ipu_param_mem.h"
+#include "ipu_regs.h"
 #include "vdoa.h"
 
 #define CHECK_RETCODE(cont, str, err, label, ret)			\
@@ -680,6 +682,11 @@ static void dump_check_warn(struct device *dev, int warn)
 
 static int set_crop(struct ipu_crop *crop, int width, int height, int fmt)
 {
+	if ((width == 0) || (height == 0)) {
+		pr_err("Invalid param: width=%d, height=%d\n", width, height);
+		return -EINVAL;
+	}
+
 	if ((IPU_PIX_FMT_TILED_NV12 == fmt) ||
 		(IPU_PIX_FMT_TILED_NV12F == fmt)) {
 		if (crop->w || crop->h) {
@@ -719,6 +726,12 @@ static int set_crop(struct ipu_crop *crop, int width, int height, int fmt)
 		crop->h -= crop->h%8;
 	}
 
+	if ((crop->w == 0) || (crop->h == 0)) {
+		pr_err("Invalid crop param: crop.w=%d, crop.h=%d\n",
+			crop->w, crop->h);
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -733,26 +746,28 @@ static void update_offset(unsigned int fmt,
 	case IPU_PIX_FMT_YUV420P:
 		*off = pos_y * width + pos_x;
 		*uoff = (width * (height - pos_y) - pos_x)
-			+ ((width/2 * pos_y/2) + pos_x/2);
-		*voff = *uoff + (width/2 * height/2);
+			+ (width/2) * (pos_y/2) + pos_x/2;
+		/* In case height is odd, round up to even */
+		*voff = *uoff + (width/2) * ((height+1)/2);
 		break;
 	case IPU_PIX_FMT_YVU420P:
 		*off = pos_y * width + pos_x;
 		*voff = (width * (height - pos_y) - pos_x)
-			+ ((width/2 * pos_y/2) + pos_x/2);
-		*uoff = *voff + (width/2 * height/2);
+			+ (width/2) * (pos_y/2) + pos_x/2;
+		/* In case height is odd, round up to even */
+		*uoff = *voff + (width/2) * ((height+1)/2);
 		break;
 	case IPU_PIX_FMT_YVU422P:
 		*off = pos_y * width + pos_x;
 		*voff = (width * (height - pos_y) - pos_x)
-			+ ((width * pos_y)/2 + pos_x/2);
-		*uoff = *voff + (width * height)/2;
+			+ (width/2) * pos_y + pos_x/2;
+		*uoff = *voff + (width/2) * height;
 		break;
 	case IPU_PIX_FMT_YUV422P:
 		*off = pos_y * width + pos_x;
 		*uoff = (width * (height - pos_y) - pos_x)
-			+ (width * pos_y)/2 + pos_x/2;
-		*voff = *uoff + (width * height)/2;
+			+ (width/2) * pos_y + pos_x/2;
+		*voff = *uoff + (width/2) * height;
 		break;
 	case IPU_PIX_FMT_YUV444P:
 		*off = pos_y * width + pos_x;
@@ -762,7 +777,7 @@ static void update_offset(unsigned int fmt,
 	case IPU_PIX_FMT_NV12:
 		*off = pos_y * width + pos_x;
 		*uoff = (width * (height - pos_y) - pos_x)
-			+ width * pos_y/2 + pos_x;
+			+ width * (pos_y/2) + pos_x;
 		break;
 	case IPU_PIX_FMT_TILED_NV12:
 		/*
@@ -799,6 +814,7 @@ static int update_split_setting(struct ipu_task_entry *t, bool vdi_split)
 	struct stripe_param down_stripe;
 	u32 iw, ih, ow, oh;
 	u32 max_width;
+	int ret;
 
 	if (t->output.rotate >= IPU_ROTATE_90_RIGHT)
 		return IPU_CHECK_ERR_SPLIT_WITH_ROT;
@@ -809,12 +825,26 @@ static int update_split_setting(struct ipu_task_entry *t, bool vdi_split)
 	ow = t->output.crop.w;
 	oh = t->output.crop.h;
 
+	memset(&left_stripe, 0, sizeof(left_stripe));
+	memset(&right_stripe, 0, sizeof(right_stripe));
+	memset(&up_stripe, 0, sizeof(up_stripe));
+	memset(&down_stripe, 0, sizeof(down_stripe));
+
 	if (t->set.split_mode & RL_SPLIT) {
+		/*
+		 * We do want equal strips: initialize stripes in case
+		 * calc_stripes returns before actually doing the calculation
+		 */
+		left_stripe.input_width = iw / 2;
+		left_stripe.output_width = ow / 2;
+		right_stripe.input_column = iw / 2;
+		right_stripe.output_column = ow / 2;
+
 		if (vdi_split)
 			max_width = soc_max_vdi_in_width();
 		else
 			max_width = soc_max_out_width();
-		ipu_calc_stripes_sizes(iw,
+		ret = ipu_calc_stripes_sizes(iw,
 				ow,
 				max_width,
 				(((unsigned long long)1) << 32), /* 32bit for fractional*/
@@ -823,6 +853,9 @@ static int update_split_setting(struct ipu_task_entry *t, bool vdi_split)
 				t->output.format,
 				&left_stripe,
 				&right_stripe);
+		if (ret)
+			dev_dbg(t->dev, "Warn: no:0x%x,calc_stripes ret:%d\n",
+				 t->task_no, ret);
 		t->set.sp_setting.iw = left_stripe.input_width;
 		t->set.sp_setting.ow = left_stripe.output_width;
 		t->set.sp_setting.outh_resize_ratio = left_stripe.irr;
@@ -846,7 +879,15 @@ static int update_split_setting(struct ipu_task_entry *t, bool vdi_split)
 		return IPU_CHECK_ERR_SPLIT_OUTPUTW_OVER;
 
 	if (t->set.split_mode & UD_SPLIT) {
-		ipu_calc_stripes_sizes(ih,
+		/*
+		 * We do want equal strips: initialize stripes in case
+		 * calc_stripes returns before actually doing the calculation
+		 */
+		up_stripe.input_width = ih / 2;
+		up_stripe.output_width = oh / 2;
+		down_stripe.input_column = ih / 2;
+		down_stripe.output_column = oh / 2;
+		ret = ipu_calc_stripes_sizes(ih,
 				oh,
 				soc_max_out_height(),
 				(((unsigned long long)1) << 32), /* 32bit for fractional*/
@@ -855,6 +896,9 @@ static int update_split_setting(struct ipu_task_entry *t, bool vdi_split)
 				t->output.format,
 				&up_stripe,
 				&down_stripe);
+		if (ret)
+			dev_err(t->dev, "Warn: no:0x%x,calc_stripes ret:%d\n",
+				 t->task_no, ret);
 		t->set.sp_setting.ih = up_stripe.input_width;
 		t->set.sp_setting.oh = up_stripe.output_width;
 		t->set.sp_setting.outv_resize_ratio = up_stripe.irr;
@@ -3111,8 +3155,7 @@ static int ipu_task_thread(void *argv)
 		int split_parent;
 		int split_child;
 
-		if(wait_event_interruptible(thread_waitq, find_task(&tsk, curr_thread_id)))
-                  break;
+		wait_event_interruptible(thread_waitq, find_task(&tsk, curr_thread_id));
 
 		if (!tsk) {
 			pr_err("thread:%d can not find task.\n",
@@ -3164,7 +3207,7 @@ static int ipu_task_thread(void *argv)
 					dev_err(tsk->dev,
 					"ERR: no-0x%x,can not get split_tsk0\n",
 					tsk->task_no);
-				wake_up(&thread_waitq);
+				wake_up_interruptible(&thread_waitq);
 				get_res_do_task(sp_tsk0);
 				dev_dbg(sp_tsk0->dev,
 					"thread:%d complete tsk no:0x%x.\n",
@@ -3268,7 +3311,7 @@ int ipu_queue_task(struct ipu_task *task)
 	tsk->task_in_list = 1;
 	dev_dbg(tsk->dev, "[0x%p,no-0x%x] list_add_tail\n", tsk, tsk->task_no);
 	spin_unlock_irqrestore(&ipu_task_list_lock, flags);
-	wake_up(&thread_waitq);
+	wake_up_interruptible(&thread_waitq);
 
 	ret = wait_event_timeout(tsk->task_waitq, atomic_read(&tsk->done),
 						msecs_to_jiffies(tsk->timeout));

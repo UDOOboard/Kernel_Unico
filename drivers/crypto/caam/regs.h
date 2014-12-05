@@ -1,7 +1,7 @@
 /*
  * CAAM hardware register-level view
  *
- * Copyright (C) 2008-2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2008-2013 Freescale Semiconductor, Inc.
  */
 
 #ifndef REGS_H
@@ -203,12 +203,27 @@ struct jr_outentry {
 #define CHA_ID_AES_HP		(0x4ull << CHA_ID_AES_SHIFT)
 #define CHA_ID_AES_DIFFPWR	(0x1ull << CHA_ID_AES_SHIFT)
 
+
 /*
  * caam_perfmon - Performance Monitor/Secure Memory Status/
  *                CAAM Global Status/Component Version IDs
  *
  * Spans f00-fff wherever instantiated
  */
+
+/* Number of DECOs */
+#define CHA_NUM_DECONUM_SHIFT	56
+#define CHA_NUM_DECONUM_MASK	(0xfull << CHA_NUM_DECONUM_SHIFT)
+
+struct sec_vid {
+	u16 ip_id;
+	u8 maj_rev;
+	u8 min_rev;
+};
+
+#define SEC_VID_IPID_SHIFT      16
+#define SEC_VID_MAJ_SHIFT       8
+#define SEC_VID_MAJ_MASK        0xFF00
 
 struct caam_perfmon {
 	/* Performance Monitor Registers			f00-f9f */
@@ -358,7 +373,6 @@ struct rngtst {
 /* RNG4 TRNG test registers */
 struct rng4tst {
 #define RTMCTL_PRGM 0x00010000	/* 1 -> program mode, 0 -> run mode */
-#define RTMCTL_OSC_DIV_MASK 0xc	/* select oscillator divider value */
 	u32 rtmctl;		/* misc. control register */
 	u32 rtscmisc;		/* statistical check misc. register */
 	u32 rtpkrrng;		/* poker range register */
@@ -378,7 +392,10 @@ struct rng4tst {
 		u32 rtfrqmax;	/* PRGM=1: freq. count max. limit register */
 		u32 rtfrqcnt;	/* PRGM=0: freq. count register */
 	};
-	u32 rsvd1[56];
+	u32 rsvd1[40];
+#define RDSTA_IF 0x00000003     /* state handle instantiated flags 0 and 1 */
+	u32 rdsta;              /* DRNG status register */
+	u32 rsvd2[15];
 };
 
 /*
@@ -402,7 +419,8 @@ struct caam_ctrl {
 	/* Read/Writable					        */
 	u32 rsvd1;
 	u32 mcr;		/* MCFG      Master Config Register  */
-	u32 rsvd2[2];
+	u32 rsvd2;
+	u32 scfgr;		/* SCFGR, Security Config Register */
 
 	/* Bus Access Configuration Section			010-11f */
 	/* Read/Writable                                                */
@@ -449,6 +467,7 @@ struct caam_ctrl {
 #define MCFGR_WDFAIL		0x20000000 /* DECO watchdog force-fail */
 #define MCFGR_DMA_RESET		0x10000000
 #define MCFGR_LONG_PTR		0x00010000 /* Use >32-bit desc addressing */
+#define SCFGR_RDBENABLE		0x00000400
 
 /* AXI read cache control */
 #define MCFGR_ARCACHE_SHIFT	12

@@ -1,7 +1,7 @@
 /*
  * CAAM/SEC 4.x functions for using scatterlists in caam driver
  *
- * Copyright (C) 2008-2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2008-2013 Freescale Semiconductor, Inc.
  *
  */
 
@@ -13,13 +13,11 @@ struct sec4_sg_entry;
 static inline void dma_to_sec4_sg_one(struct sec4_sg_entry *sec4_sg_ptr,
 				      dma_addr_t dma, u32 len, u32 offset)
 {
-#ifndef CONFIG_64BIT
-	sec4_sg_ptr->reserved = 0;	/* ensure MSB half is zeroed */
-#endif
 	sec4_sg_ptr->ptr = dma;
-	sec4_sg_ptr->len |= (len & SEC4_SG_LEN_MASK);
-	/* Does not add in buffer pool ID's at this time */
-	sec4_sg_ptr->bpid_offset = (offset & SEC4_SG_OFFS_MASK);
+	sec4_sg_ptr->len = len;
+	sec4_sg_ptr->reserved = 0;
+	sec4_sg_ptr->buf_pool_id = 0;
+	sec4_sg_ptr->offset = offset;
 #ifdef DEBUG
 	print_hex_dump(KERN_ERR, "sec4_sg_ptr@: ",
 		       DUMP_PREFIX_ADDRESS, 16, 4, sec4_sg_ptr,
@@ -93,9 +91,14 @@ static int dma_map_sg_chained(struct device *dev, struct scatterlist *sg,
 {
 	if (unlikely(chained)) {
 		int i;
+	struct scatterlist *tsg = sg;
+
+	/* We use a local copy of the sg pointer to avoid moving the
+	 * head of the list pointed to by sg as we wall the list.
+	 */
 		for (i = 0; i < nents; i++) {
-			dma_map_sg(dev, sg, 1, dir);
-			sg = scatterwalk_sg_next(sg);
+			dma_map_sg(dev, tsg, 1, dir);
+			tsg = scatterwalk_sg_next(tsg);
 		}
 	} else {
 		dma_map_sg(dev, sg, nents, dir);

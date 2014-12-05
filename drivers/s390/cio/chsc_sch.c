@@ -1,7 +1,7 @@
 /*
  * Driver for s390 chsc subchannels
  *
- * Copyright IBM Corp. 2008, 2009
+ * Copyright IBM Corp. 2008, 2011
  *
  * Author(s): Cornelia Huck <cornelia.huck@de.ibm.com>
  *
@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/uaccess.h>
 #include <linux/miscdevice.h>
+#include <linux/kernel_stat.h>
 
 #include <asm/compat.h>
 #include <asm/cio.h>
@@ -57,6 +58,8 @@ static void chsc_subchannel_irq(struct subchannel *sch)
 
 	CHSC_LOG(4, "irb");
 	CHSC_LOG_HEX(4, irb, sizeof(*irb));
+	inc_irq_stat(IRQIO_CSC);
+
 	/* Copy irb to provided request and set done. */
 	if (!request) {
 		CHSC_MSG(0, "Interrupt on sch 0.%x.%04x with no request\n",

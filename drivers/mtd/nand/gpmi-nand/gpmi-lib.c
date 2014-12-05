@@ -1,7 +1,7 @@
 /*
  * Freescale GPMI NAND Flash Driver
  *
- * Copyright (C) 2008-2013 Freescale Semiconductor, Inc.
+ * Copyright (C) 2008-2011 Freescale Semiconductor, Inc.
  * Copyright (C) 2008 Embedded Alley Solutions, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -18,23 +18,14 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
-#include <linux/mtd/gpmi-nand.h>
 #include <linux/delay.h>
 #include <linux/clk.h>
-#include <mach/mxs.h>
-#include <mach/clock.h>
 
 #include "gpmi-nand.h"
 #include "gpmi-regs.h"
 #include "bch-regs.h"
 
-#define FEATURE_SIZE		4	/* p1, p2, p3, p4 */
-#define NAND_CMD_SET_FEATURE	0xef
-#define NAND_CMD_GET_FEATURE	0xee
-#define ONFI_ASYNC_MODE_4	(1 << 4)
-#define ONFI_ASYNC_MODE_5	(1 << 5)
-
-struct timing_threshod timing_default_threshold = {
+static struct timing_threshod timing_default_threshold = {
 	.max_data_setup_cycles       = (BM_GPMI_TIMING0_DATA_SETUP >>
 						BP_GPMI_TIMING0_DATA_SETUP),
 	.internal_data_setup_in_ns   = 0,
@@ -44,436 +35,8 @@ struct timing_threshod timing_default_threshold = {
 	.max_dll_delay_in_ns         = 16,
 };
 
-struct clk *mxs_dma_clk;
-
-static void setup_ddr_timing_onfi(struct gpmi_nand_data *this)
-{
-	uint32_t value;
-	struct resources  *resources = &this->resources;
-
-	/* set timing 2 register */
-	value = BF_GPMI_TIMING2_DATA_PAUSE(0x6)
-		| BF_GPMI_TIMING2_CMDADD_PAUSE(0x4)
-		| BF_GPMI_TIMING2_POSTAMBLE_DELAY(0x2)
-		| BF_GPMI_TIMING2_PREAMBLE_DELAY(0x4)
-		| BF_GPMI_TIMING2_CE_DELAY(0x2)
-		| BF_GPMI_TIMING2_READ_LATENCY(0x2);
-
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_TIMING2);
-
-	/* set timing 1 register */
-	__raw_writel(BF_GPMI_TIMING1_DEVICE_BUSY_TIMEOUT(0x500),
-			resources->gpmi_regs + HW_GPMI_TIMING1);
-
-	/* Put GPMI in NAND mode, disable device reset, and make certain
-	   IRQRDY polarity is active high. */
-	value = BV_GPMI_CTRL1_GPMI_MODE__NAND
-		| BM_GPMI_CTRL1_GANGED_RDYBUSY
-		| BF_GPMI_CTRL1_WRN_DLY_SEL(0x3)
-		| (BV_GPMI_CTRL1_DEV_RESET__DISABLED << 3)
-		| (BV_GPMI_CTRL1_ATA_IRQRDY_POLARITY__ACTIVEHIGH << 2);
-
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_CTRL1_SET);
-}
-
-/* This must be called in the context of enabling necessary clocks */
-static void common_ddr_init(struct resources *resources)
-{
-	uint32_t value;
-
-	/* [6] enable both write & read DDR DLLs */
-	value = BM_GPMI_READ_DDR_DLL_CTRL_REFCLK_ON |
-		BM_GPMI_READ_DDR_DLL_CTRL_ENABLE |
-		BF_GPMI_READ_DDR_DLL_CTRL_SLV_UPDATE_INT(0x2) |
-		BF_GPMI_READ_DDR_DLL_CTRL_SLV_DLY_TARGET(0x7);
-
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_READ_DDR_DLL_CTRL);
-
-	/* [7] reset read */
-	__raw_writel(value | BM_GPMI_READ_DDR_DLL_CTRL_RESET,
-			resources->gpmi_regs + HW_GPMI_READ_DDR_DLL_CTRL);
-	value = value & ~BM_GPMI_READ_DDR_DLL_CTRL_RESET;
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_READ_DDR_DLL_CTRL);
-
-	value = BM_GPMI_WRITE_DDR_DLL_CTRL_REFCLK_ON |
-		BM_GPMI_WRITE_DDR_DLL_CTRL_ENABLE    |
-		BF_GPMI_WRITE_DDR_DLL_CTRL_SLV_UPDATE_INT(0x2) |
-		BF_GPMI_WRITE_DDR_DLL_CTRL_SLV_DLY_TARGET(0x7) ,
-
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_WRITE_DDR_DLL_CTRL);
-
-	/* [8] reset write */
-	__raw_writel(value | BM_GPMI_WRITE_DDR_DLL_CTRL_RESET,
-			resources->gpmi_regs + HW_GPMI_WRITE_DDR_DLL_CTRL);
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_WRITE_DDR_DLL_CTRL);
-
-	/* [9] wait for locks for read and write  */
-	do {
-		uint32_t read_status, write_status;
-		uint32_t r_mask, w_mask;
-
-		read_status = __raw_readl(resources->gpmi_regs
-					+ HW_GPMI_READ_DDR_DLL_STS);
-		write_status = __raw_readl(resources->gpmi_regs
-					+ HW_GPMI_WRITE_DDR_DLL_STS);
-
-		r_mask = (BM_GPMI_READ_DDR_DLL_STS_REF_LOCK |
-				BM_GPMI_READ_DDR_DLL_STS_SLV_LOCK);
-		w_mask = (BM_GPMI_WRITE_DDR_DLL_STS_REF_LOCK |
-				BM_GPMI_WRITE_DDR_DLL_STS_SLV_LOCK);
-
-		if (((read_status & r_mask) == r_mask)
-			&& ((write_status & w_mask) == w_mask))
-				break;
-	} while (1);
-
-	/* [10] force update of read/write */
-	value = __raw_readl(resources->gpmi_regs + HW_GPMI_READ_DDR_DLL_CTRL);
-	__raw_writel(value | BM_GPMI_READ_DDR_DLL_CTRL_SLV_FORCE_UPD,
-			resources->gpmi_regs + HW_GPMI_READ_DDR_DLL_CTRL);
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_READ_DDR_DLL_CTRL);
-
-	value = __raw_readl(resources->gpmi_regs + HW_GPMI_WRITE_DDR_DLL_CTRL);
-	__raw_writel(value | BM_GPMI_WRITE_DDR_DLL_CTRL_SLV_FORCE_UPD,
-			resources->gpmi_regs + HW_GPMI_WRITE_DDR_DLL_CTRL);
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_WRITE_DDR_DLL_CTRL);
-
-	/* [11] set gate update */
-	value = __raw_readl(resources->gpmi_regs + HW_GPMI_READ_DDR_DLL_CTRL);
-	value |= BM_GPMI_READ_DDR_DLL_CTRL_GATE_UPDATE;
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_READ_DDR_DLL_CTRL);
-
-	value = __raw_readl(resources->gpmi_regs + HW_GPMI_WRITE_DDR_DLL_CTRL);
-	value |= BM_GPMI_WRITE_DDR_DLL_CTRL_GATE_UPDATE;
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_WRITE_DDR_DLL_CTRL);
-}
-
-static int enable_ddr_onfi(struct gpmi_nand_data *this)
-{
-	struct resources  *resources = &this->resources;
-	struct nand_chip *nand = &this->nand;
-	struct mtd_info	 *mtd = &this->mtd;
-	int saved_chip_number = 0;
-	uint8_t device_feature[FEATURE_SIZE];
-	int mode = 5;/* there is 5 mode available, default is 0 */
-
-	saved_chip_number = this->current_chip;
-	nand->select_chip(mtd, 0);
-
-	/* [0] set proper timing */
-	__raw_writel(BF_GPMI_TIMING0_ADDRESS_SETUP(0x1)
-			| BF_GPMI_TIMING0_DATA_HOLD(0x3)
-			| BF_GPMI_TIMING0_DATA_SETUP(0x3),
-			resources->gpmi_regs + HW_GPMI_TIMING0);
-
-	/* [1] send SET FEATURE commond to NAND */
-	memset(device_feature, 0, sizeof(device_feature));
-	device_feature[0] = (0x1 << 4) | (mode & 0x7);
-
-	nand->cmdfunc(mtd, NAND_CMD_RESET, -1, -1);
-	nand->cmdfunc(mtd, NAND_CMD_SET_FEATURE, 1, -1);
-	nand->write_buf(mtd, device_feature, FEATURE_SIZE);
-
-	/* [2] set clk divider */
-	__raw_writel(BM_GPMI_CTRL1_GPMI_CLK_DIV2_EN,
-			resources->gpmi_regs + HW_GPMI_CTRL1_SET);
-
-	/* [3] about the clock, pay attention! */
-	nand->select_chip(mtd, saved_chip_number);
-	{
-		struct clk *enfc_clk;
-		enfc_clk = clk_get(NULL, "enfc_clk");
-		if (IS_ERR(enfc_clk)) {
-			printk(KERN_INFO "No enfc_clk clock\n");
-			return -EINVAL;
-		}
-		clk_set_parent(resources->clock, enfc_clk);
-		clk_set_rate(enfc_clk, \
-				enfc_clk->round_rate(enfc_clk, 100000000));
-		clk_set_rate(resources->clock, 100000000);
-	}
-	nand->select_chip(mtd, 0);
-
-	/* [4] setup timing */
-	setup_ddr_timing_onfi(this);
-
-	/* [5] set to SYNC mode */
-	__raw_writel(BM_GPMI_CTRL1_TOGGLE_MODE,
-			    resources->gpmi_regs + HW_GPMI_CTRL1_CLR);
-	__raw_writel(BM_GPMI_CTRL1_SSYNCMODE | BM_GPMI_CTRL1_GANGED_RDYBUSY,
-			    resources->gpmi_regs + HW_GPMI_CTRL1_SET);
-
-	/* common DDR initialization */
-	common_ddr_init(resources);
-
-	nand->select_chip(mtd, saved_chip_number);
-
-	printk(KERN_INFO "Micron ONFI NAND enters synchronous mode %d\n", mode);
-	return 0;
-}
-
-static void setup_ddr_timing_toggle(struct gpmi_nand_data *this)
-{
-	uint32_t value;
-	struct resources  *resources = &this->resources;
-
-	/* set timing 2 register */
-	value = BF_GPMI_TIMING2_DATA_PAUSE(0x6)
-		| BF_GPMI_TIMING2_CMDADD_PAUSE(0x4)
-		| BF_GPMI_TIMING2_POSTAMBLE_DELAY(0x3)
-		| BF_GPMI_TIMING2_PREAMBLE_DELAY(0x2)
-		| BF_GPMI_TIMING2_CE_DELAY(0x2)
-		| BF_GPMI_TIMING2_READ_LATENCY(0x2);
-
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_TIMING2);
-
-	/* set timing 1 register */
-	__raw_writel(BF_GPMI_TIMING1_DEVICE_BUSY_TIMEOUT(0x500),
-			resources->gpmi_regs + HW_GPMI_TIMING1);
-
-	/* Put GPMI in NAND mode, disable device reset, and make certain
-	   IRQRDY polarity is active high. */
-	value = BV_GPMI_CTRL1_GPMI_MODE__NAND
-		| BM_GPMI_CTRL1_GANGED_RDYBUSY
-		| (BV_GPMI_CTRL1_DEV_RESET__DISABLED << 3)
-		| (BV_GPMI_CTRL1_ATA_IRQRDY_POLARITY__ACTIVEHIGH << 2);
-
-	__raw_writel(value, resources->gpmi_regs + HW_GPMI_CTRL1_SET);
-}
-
-static int enable_ddr_toggle(struct gpmi_nand_data *this)
-{
-	struct resources  *resources = &this->resources;
-	struct nand_chip *nand = &this->nand;
-	struct mtd_info	 *mtd = &this->mtd;
-	int saved_chip_number = this->current_chip;
-
-	nand->select_chip(mtd, 0);
-
-	/* [0] set proper timing */
-	__raw_writel(BF_GPMI_TIMING0_ADDRESS_SETUP(0x5)
-			| BF_GPMI_TIMING0_DATA_HOLD(0xa)
-			| BF_GPMI_TIMING0_DATA_SETUP(0xa),
-			resources->gpmi_regs + HW_GPMI_TIMING0);
-
-	/* [2] set clk divider */
-	__raw_writel(BM_GPMI_CTRL1_GPMI_CLK_DIV2_EN,
-			resources->gpmi_regs + HW_GPMI_CTRL1_SET);
-
-	/* [3] about the clock, pay attention! */
-	nand->select_chip(mtd, saved_chip_number);
-	{
-		struct clk *enfc_clk;
-		unsigned long rate;
-
-		enfc_clk = clk_get(NULL, "enfc_clk");
-		if (IS_ERR(enfc_clk)) {
-			printk(KERN_INFO "No enfc_clk clock\n");
-			return -EINVAL;
-		}
-
-		/* toggle nand : 133/66 MHz */
-		rate = 33000000;
-		clk_set_parent(resources->clock, enfc_clk);
-		clk_set_rate(enfc_clk, \
-				enfc_clk->round_rate(enfc_clk, rate));
-		clk_set_rate(resources->clock, rate);
-	}
-	nand->select_chip(mtd, 0);
-
-	/* [4] setup timing */
-	setup_ddr_timing_toggle(this);
-
-	/* [5] set to TOGGLE mode */
-	__raw_writel(BM_GPMI_CTRL1_SSYNCMODE,
-			    resources->gpmi_regs + HW_GPMI_CTRL1_CLR);
-	__raw_writel(BM_GPMI_CTRL1_TOGGLE_MODE | BM_GPMI_CTRL1_GANGED_RDYBUSY,
-			    resources->gpmi_regs + HW_GPMI_CTRL1_SET);
-
-	/* common DDR initialization */
-	common_ddr_init(resources);
-
-	nand->select_chip(mtd, saved_chip_number);
-
-	printk(KERN_INFO "-- Sumsung TOGGLE NAND is enabled now. --\n");
-	return 0;
-}
-
-inline bool is_board_support_ddr(struct gpmi_nand_data *this)
-{
-	 /* Only arm2 lpddr2pop board supports the DDR, */
-	 /* the common arm2 board does not. */
-	return this->pdata->enable_ddr;
-}
-
-inline bool is_ddr_nand(struct gpmi_nand_data *this)
-{
-	return this->nand.onfi_version;
-}
-
-/*
- * Firstly, we should know what's the GPMI-clock-period means.
- * The GPMI-clock-period is the internal clock in the gpmi nand controller.
- * If you set 100MHz to gpmi nand controller, the GPMI-clock-period is 10ns.
- *
- * Now, we begin to describe how to compute the right RDN_DELAY.
- *
- * 1) From the aspect of the nand chip pin:
- *     Delay = (tREA + C - tRP)              [1]
- *
- *     tREA : the maximum read access time. From the ONFI nand standards,
- *            we know that tREA is 16ns in mode 5, tREA is 20ns is mode 4.
- *            Please check it in : www.onfi.org
- *     C    : a constant for adjust the delay. Choose 4 or 3.
- *     tRP  : the read pulse width.
- *            Specified by the HW_GPMI_TIMING0:DATA_SETUP:
- *                 tRP = (GPMI-clock-period) * DATA_SETUP
- *
- * 2) From the aspect of the GPMI nand controller:
- *     Delay = RDN_DELAY * 0.125 * RP        [2]
- *
- *     RP   : the DLL reference period.
- *            if (GPMI-clock-period > 12ns)
- *                   RP = GPMI-clock-period / 2;
- *            else
- *                   RP = GPMI-clock-period;
- *
- *            Set the HW_GPMI_CTRL1:HALF_PERIOD if GPMI-clock-period
- *            is greater 12ns.
- *
- * 3) since [1] equals [2], we get:
- *
- *               (tREA + 4 - tRP) * 8
- *   RDN_DELAY = ---------------------       [3]
- *                      RP
- *
- * 4) We only support the fastest asynchronous mode of ONFI nand.
- *    For some ONFI nand, the mode 4 is the fastest mode;
- *    while for some ONFI nand, the mode 5 is the fastest mode.
- *    So we only support the mode 4 and mode 5. It is no need to
- *    support other modes.
- */
-static void set_edo_timing(struct gpmi_nand_data *this,
-			struct gpmi_nfc_hardware_timing *hw)
-{
-	int mode = this->timing_mode;
-
-	/* for GPMI_HW_GPMI_TIMING0 */
-	hw->data_setup_in_cycles = 1;
-	hw->data_hold_in_cycles = 1;
-	hw->address_setup_in_cycles = ((5 == mode) ? 1 : 0);
-
-	/* for GPMI_HW_GPMI_TIMING1 */
-	hw->device_busy_timeout = 0x9000;
-
-	/* for GPMI_HW_GPMI_CTRL1 */
-	hw->wrn_dly_sel = 3; /* no delay for write strobe. */
-	if (GPMI_IS_MX6Q(this)) {
-		/*
-		 * for mx6q, we give a parameter table about the delay:
-		 *                delay   |  half_period
-		 *            + -------------------------+
-		 *   (mode 5) |     8     |      0       |
-		 *    ------  | -------------------------+
-		 *   (mode 4) |    0xe    |      1       |
-		 *            + -------------------------+
-		 */
-		if (mode == 5) {
-			hw->sample_delay_factor = 8;
-			hw->use_half_periods = 0;
-		} else /* mode == 4 */{
-			hw->sample_delay_factor = 0xe;
-			hw->use_half_periods = 1;
-		}
-	}
-}
-
-static int enable_edo_mode(struct gpmi_nand_data *this, int mode)
-{
-	struct resources  *r = &this->resources;
-	struct nand_chip *nand = &this->nand;
-	struct mtd_info	 *mtd = &this->mtd;
-	uint8_t device_feature[FEATURE_SIZE];
-	int status;
-
-	nand->select_chip(mtd, 0);
-
-	/* [1] send SET FEATURE commond to NAND */
-	memset(device_feature, 0, sizeof(device_feature));
-	device_feature[0] = mode & 0x7;
-
-	nand->cmdfunc(mtd, NAND_CMD_RESET, -1, -1);
-	nand->cmdfunc(mtd, NAND_CMD_SET_FEATURE, 1, -1);
-	nand->write_buf(mtd, device_feature, FEATURE_SIZE);
-	status = nand->waitfunc(mtd, nand);
-	if (status & 1) {
-		printk(KERN_ERR "fail !!\n");
-		return -EINVAL;
-	}
-
-	memset(device_feature, 0, 4);
-	nand->cmdfunc(mtd, NAND_CMD_GET_FEATURE, 1, -1);
-	nand->read_buf(mtd, device_feature, 4);
-	if (device_feature[0] != mode) {
-		printk(KERN_ERR "failed in set feature of mode : %d\n", mode);
-		return -EINVAL;
-
-	}
-
-	nand->select_chip(mtd, -1);
-
-	/* [2] about the clock, pay attention! */
-	{
-		unsigned long rate;
-		struct clk *enfc_clk;
-
-		enfc_clk = clk_get(NULL, "enfc_clk");
-		if (IS_ERR(enfc_clk)) {
-			printk(KERN_INFO "No enfc_clk clock\n");
-			return -EINVAL;
-		}
-
-		clk_set_parent(r->clock, enfc_clk);
-		rate = (mode == 5) ? 100000000 : 80000000;
-		clk_set_rate(enfc_clk, enfc_clk->round_rate(enfc_clk, rate));
-		clk_set_rate(r->clock, rate);
-	}
-
-	this->flags |= ASYNC_EDO_ENABLED;
-	this->timing_mode = mode;
-	dev_info(this->dev, "enable asynchronous EDO mode %d\n", mode);
-	return 0;
-}
-/* To check if we need to initialize something else*/
-int extra_init(struct gpmi_nand_data *this)
-{
-	if (is_board_support_ddr(this)) {
-		if (1)
-			return enable_ddr_onfi(this);
-		if (0)
-			return enable_ddr_toggle(this);
-	}
-
-	/* Enable the asynchronous EDO mode, we only support the mode 4 and 5 */
-	if (is_ddr_nand(this)) {
-		struct nand_chip *nand = &this->nand;
-		int mode;
-
-		mode = le16_to_cpu(nand->onfi_params.async_timing_mode);
-
-		if (mode & ONFI_ASYNC_MODE_5)
-			mode = 5;
-		else if (mode & ONFI_ASYNC_MODE_4)
-			mode = 4;
-		else
-			return 0;
-
-		return enable_edo_mode(this, mode);
-	}
-
-	return 0;
-}
-
+#define MXS_SET_ADDR		0x4
+#define MXS_CLR_ADDR		0x8
 /*
  * Clear the bit and poll it cleared.  This is usually called with
  * a reset address and mask being either SFTRST(bit 31) or CLKGATE
@@ -484,7 +47,7 @@ static int clear_poll_bit(void __iomem *addr, u32 mask)
 	int timeout = 0x400;
 
 	/* clear the bit */
-	__mxs_clrl(mask, addr);
+	writel(mask, addr + MXS_CLR_ADDR);
 
 	/*
 	 * SFTRST needs 3 GPMI clocks to settle, the reference manual
@@ -507,7 +70,7 @@ static int clear_poll_bit(void __iomem *addr, u32 mask)
  *  [2] reset the module.
  *
  * In most of the cases, it's ok.
- * But in MX23, there is a hardware bug in the BCH block(see 2847 from errata).
+ * But in MX23, there is a hardware bug in the BCH block (see erratum #2847).
  * If you try to soft reset the BCH block, it becomes unusable until
  * the next hard reset. This case occurs in the NAND boot mode. When the board
  * boots by NAND, the ROM of the chip will initialize the BCH blocks itself.
@@ -529,11 +92,11 @@ static int gpmi_reset_block(void __iomem *reset_addr, bool just_enable)
 		goto error;
 
 	/* clear CLKGATE */
-	__mxs_clrl(MODULE_CLKGATE, reset_addr);
+	writel(MODULE_CLKGATE, reset_addr + MXS_CLR_ADDR);
 
 	if (!just_enable) {
 		/* set SFTRST to reset the block */
-		__mxs_setl(MODULE_SFTRST, reset_addr);
+		writel(MODULE_SFTRST, reset_addr + MXS_SET_ADDR);
 		udelay(1);
 
 		/* poll CLKGATE becoming set */
@@ -560,23 +123,56 @@ error:
 	return -ETIMEDOUT;
 }
 
+static int __gpmi_enable_clk(struct gpmi_nand_data *this, bool v)
+{
+	struct clk *clk;
+	int ret;
+	int i;
+
+	for (i = 0; i < GPMI_CLK_MAX; i++) {
+		clk = this->resources.clock[i];
+		if (!clk)
+			break;
+
+		if (v) {
+			ret = clk_prepare_enable(clk);
+			if (ret)
+				goto err_clk;
+		} else {
+			clk_disable_unprepare(clk);
+		}
+	}
+	return 0;
+
+err_clk:
+	for (; i > 0; i--)
+		clk_disable_unprepare(this->resources.clock[i - 1]);
+	return ret;
+}
+
+#define gpmi_enable_clk(x) __gpmi_enable_clk(x, true)
+#define gpmi_disable_clk(x) __gpmi_enable_clk(x, false)
+
 int gpmi_init(struct gpmi_nand_data *this)
 {
 	struct resources *r = &this->resources;
 	int ret;
 
-	mxs_dma_clk = clk_get(NULL, "mxs-dma-apbh");
-	if (IS_ERR(mxs_dma_clk)) {
-		pr_err("can not get the dma clock\n");
-		ret = -ENOENT;
-		goto err_out;
-	}
-	ret = clk_prepare_enable(r->clock);
+	ret = gpmi_enable_clk(this);
 	if (ret)
 		goto err_out;
 	ret = gpmi_reset_block(r->gpmi_regs, false);
 	if (ret)
 		goto err_out;
+
+	/*
+	 * Reset BCH here, too. We got failures otherwise :(
+	 * See later BCH reset for explanation of MX23 handling
+	 */
+	ret = gpmi_reset_block(r->bch_regs, GPMI_IS_MX23(this));
+	if (ret)
+		goto err_out;
+
 
 	/* Choose NAND mode. */
 	writel(BM_GPMI_CTRL1_GPMI_MODE, r->gpmi_regs + HW_GPMI_CTRL1_CLR);
@@ -591,7 +187,7 @@ int gpmi_init(struct gpmi_nand_data *this)
 	/* Select BCH ECC. */
 	writel(BM_GPMI_CTRL1_BCH_MODE, r->gpmi_regs + HW_GPMI_CTRL1_SET);
 
-	clk_disable_unprepare(r->clock);
+	gpmi_disable_clk(this);
 	return 0;
 err_out:
 	return ret;
@@ -612,6 +208,11 @@ void gpmi_dump_info(struct gpmi_nand_data *this)
 	}
 
 	/* start to print out the BCH info */
+	pr_err("Show BCH registers :\n");
+	for (i = 0; i <= HW_BCH_VERSION / 0x10 + 1; i++) {
+		reg = readl(r->bch_regs + i * 0x10);
+		pr_err("offset 0x%.3x : 0x%.8x\n", i * 0x10, reg);
+	}
 	pr_err("BCH Geometry :\n");
 	pr_err("GF length              : %u\n", geo->gf_len);
 	pr_err("ECC Strength           : %u\n", geo->ecc_strength);
@@ -636,6 +237,7 @@ int bch_set_geometry(struct gpmi_nand_data *this)
 	unsigned int metadata_size;
 	unsigned int ecc_strength;
 	unsigned int page_size;
+	unsigned int gf_len;
 	int ret;
 
 	if (common_nfc_set_geometry(this))
@@ -646,13 +248,14 @@ int bch_set_geometry(struct gpmi_nand_data *this)
 	metadata_size = bch_geo->metadata_size;
 	ecc_strength  = bch_geo->ecc_strength >> 1;
 	page_size     = bch_geo->page_size;
+	gf_len        = bch_geo->gf_len;
 
-	ret = clk_prepare_enable(r->clock);
+	ret = gpmi_enable_clk(this);
 	if (ret)
 		goto err_out;
 
 	/*
-	* Due to Errata #2847 of the MX23, the BCH cannot be soft reset on this
+	* Due to erratum #2847 of the MX23, the BCH cannot be soft reset on this
 	* chip, otherwise it will lock up. So we skip resetting BCH on the MX23.
 	* On the other hand, the MX28 needs the reset, because one case has been
 	* seen where the BCH produced ECC errors constantly after 10000
@@ -667,15 +270,13 @@ int bch_set_geometry(struct gpmi_nand_data *this)
 	writel(BF_BCH_FLASH0LAYOUT0_NBLOCKS(block_count)
 			| BF_BCH_FLASH0LAYOUT0_META_SIZE(metadata_size)
 			| BF_BCH_FLASH0LAYOUT0_ECC0(ecc_strength, this)
-			| (is_ddr_nand(this) && is_board_support_ddr(this) ? \
-				BM_BCH_FLASH0LAYOUT0_GF13_0_GF14_1 : 0)
+			| BF_BCH_FLASH0LAYOUT0_GF(gf_len, this)
 			| BF_BCH_FLASH0LAYOUT0_DATA0_SIZE(block_size, this),
 			r->bch_regs + HW_BCH_FLASH0LAYOUT0);
 
 	writel(BF_BCH_FLASH0LAYOUT1_PAGE_SIZE(page_size)
 			| BF_BCH_FLASH0LAYOUT1_ECCN(ecc_strength, this)
-			| (is_ddr_nand(this) && is_board_support_ddr(this) ? \
-				BM_BCH_FLASH0LAYOUT1_GF13_0_GF14_1 : 0)
+			| BF_BCH_FLASH0LAYOUT1_GF(gf_len, this)
 			| BF_BCH_FLASH0LAYOUT1_DATAN_SIZE(block_size, this),
 			r->bch_regs + HW_BCH_FLASH0LAYOUT1);
 
@@ -686,7 +287,7 @@ int bch_set_geometry(struct gpmi_nand_data *this)
 	writel(BM_BCH_CTRL_COMPLETE_IRQ_EN,
 				r->bch_regs + HW_BCH_CTRL_SET);
 
-	clk_disable_unprepare(r->clock);
+	gpmi_disable_clk(this);
 	return 0;
 err_out:
 	return ret;
@@ -702,11 +303,12 @@ static unsigned int ns_to_cycles(unsigned int time,
 	return max(k, min);
 }
 
+#define DEF_MIN_PROP_DELAY	5
+#define DEF_MAX_PROP_DELAY	9
 /* Apply timing to current hardware conditions. */
 static int gpmi_nfc_compute_hardware_timing(struct gpmi_nand_data *this,
 					struct gpmi_nfc_hardware_timing *hw)
 {
-	struct gpmi_nand_platform_data *pdata = this->pdata;
 	struct timing_threshod *nfc = &timing_default_threshold;
 	struct resources *r = &this->resources;
 	struct nand_chip *nand = &this->nand;
@@ -724,8 +326,8 @@ static int gpmi_nfc_compute_hardware_timing(struct gpmi_nand_data *this,
 	int ideal_sample_delay_in_ns;
 	unsigned int sample_delay_factor;
 	int tEYE;
-	unsigned int min_prop_delay_in_ns = pdata->min_prop_delay_in_ns;
-	unsigned int max_prop_delay_in_ns = pdata->max_prop_delay_in_ns;
+	unsigned int min_prop_delay_in_ns = DEF_MIN_PROP_DELAY;
+	unsigned int max_prop_delay_in_ns = DEF_MAX_PROP_DELAY;
 
 	/*
 	 * If there are multiple chips, we need to relax the timings to allow
@@ -748,9 +350,9 @@ static int gpmi_nfc_compute_hardware_timing(struct gpmi_nand_data *this,
 		(target.tRHOH_in_ns >= 0) ;
 
 	/* Inspect the clock. */
-	nfc->clock_frequency_in_hz = clk_get_rate(r->clock);
+	nfc->clock_frequency_in_hz = clk_get_rate(r->clock[0]);
 	clock_frequency_in_hz = nfc->clock_frequency_in_hz;
-	clock_period_in_ns    = 1000000000 / clock_frequency_in_hz;
+	clock_period_in_ns    = NSEC_PER_SEC / clock_frequency_in_hz;
 
 	/*
 	 * The NFC quantizes setup and hold parameters in terms of clock cycles.
@@ -1145,10 +747,222 @@ return_results:
 	hw->address_setup_in_cycles = address_setup_in_cycles;
 	hw->use_half_periods        = dll_use_half_periods;
 	hw->sample_delay_factor     = sample_delay_factor;
-	hw->device_busy_timeout     = 0x500; /* default busy timeout value. */
-	hw->wrn_dly_sel             = 0;
+	hw->device_busy_timeout     = GPMI_DEFAULT_BUSY_TIMEOUT;
+	hw->wrn_dly_sel             = BV_GPMI_CTRL1_WRN_DLY_SEL_4_TO_8NS;
 
 	/* Return success. */
+	return 0;
+}
+
+/*
+ * <1> Firstly, we should know what's the GPMI-clock means.
+ *     The GPMI-clock is the internal clock in the gpmi nand controller.
+ *     If you set 100MHz to gpmi nand controller, the GPMI-clock's period
+ *     is 10ns. Mark the GPMI-clock's period as GPMI-clock-period.
+ *
+ * <2> Secondly, we should know what's the frequency on the nand chip pins.
+ *     The frequency on the nand chip pins is derived from the GPMI-clock.
+ *     We can get it from the following equation:
+ *
+ *         F = G / (DS + DH)
+ *
+ *         F  : the frequency on the nand chip pins.
+ *         G  : the GPMI clock, such as 100MHz.
+ *         DS : GPMI_HW_GPMI_TIMING0:DATA_SETUP
+ *         DH : GPMI_HW_GPMI_TIMING0:DATA_HOLD
+ *
+ * <3> Thirdly, when the frequency on the nand chip pins is above 33MHz,
+ *     the nand EDO(extended Data Out) timing could be applied.
+ *     The GPMI implements a feedback read strobe to sample the read data.
+ *     The feedback read strobe can be delayed to support the nand EDO timing
+ *     where the read strobe may deasserts before the read data is valid, and
+ *     read data is valid for some time after read strobe.
+ *
+ *     The following figure illustrates some aspects of a NAND Flash read:
+ *
+ *                   |<---tREA---->|
+ *                   |             |
+ *                   |         |   |
+ *                   |<--tRP-->|   |
+ *                   |         |   |
+ *                  __          ___|__________________________________
+ *     RDN            \________/   |
+ *                                 |
+ *                                 /---------\
+ *     Read Data    --------------<           >---------
+ *                                 \---------/
+ *                                |     |
+ *                                |<-D->|
+ *     FeedbackRDN  ________             ____________
+ *                          \___________/
+ *
+ *          D stands for delay, set in the HW_GPMI_CTRL1:RDN_DELAY.
+ *
+ *
+ * <4> Now, we begin to describe how to compute the right RDN_DELAY.
+ *
+ *  4.1) From the aspect of the nand chip pins:
+ *        Delay = (tREA + C - tRP)               {1}
+ *
+ *        tREA : the maximum read access time. From the ONFI nand standards,
+ *               we know that tREA is 16ns in mode 5, tREA is 20ns is mode 4.
+ *               Please check it in : www.onfi.org
+ *        C    : a constant for adjust the delay. default is 4.
+ *        tRP  : the read pulse width.
+ *               Specified by the HW_GPMI_TIMING0:DATA_SETUP:
+ *                    tRP = (GPMI-clock-period) * DATA_SETUP
+ *
+ *  4.2) From the aspect of the GPMI nand controller:
+ *         Delay = RDN_DELAY * 0.125 * RP        {2}
+ *
+ *         RP   : the DLL reference period.
+ *            if (GPMI-clock-period > DLL_THRETHOLD)
+ *                   RP = GPMI-clock-period / 2;
+ *            else
+ *                   RP = GPMI-clock-period;
+ *
+ *            Set the HW_GPMI_CTRL1:HALF_PERIOD if GPMI-clock-period
+ *            is greater DLL_THRETHOLD. In other SOCs, the DLL_THRETHOLD
+ *            is 16ns, but in mx6q, we use 12ns.
+ *
+ *  4.3) since {1} equals {2}, we get:
+ *
+ *                    (tREA + 4 - tRP) * 8
+ *         RDN_DELAY = ---------------------     {3}
+ *                           RP
+ *
+ *  4.4) We only support the fastest asynchronous mode of ONFI nand.
+ *       For some ONFI nand, the mode 4 is the fastest mode;
+ *       while for some ONFI nand, the mode 5 is the fastest mode.
+ *       So we only support the mode 4 and mode 5. It is no need to
+ *       support other modes.
+ */
+static void gpmi_compute_edo_timing(struct gpmi_nand_data *this,
+			struct gpmi_nfc_hardware_timing *hw)
+{
+	struct resources *r = &this->resources;
+	unsigned long rate = clk_get_rate(r->clock[0]);
+	int mode = this->timing_mode;
+	int dll_threshold = 16; /* in ns */
+	unsigned long delay;
+	unsigned long clk_period;
+	int t_rea;
+	int c = 4;
+	int t_rp;
+	int rp;
+
+	/*
+	 * [1] for GPMI_HW_GPMI_TIMING0:
+	 *     The async mode requires 40MHz for mode 4, 50MHz for mode 5.
+	 *     The GPMI can support 100MHz at most. So if we want to
+	 *     get the 40MHz or 50MHz, we have to set DS=1, DH=1.
+	 *     Set the ADDRESS_SETUP to 0 in mode 4.
+	 */
+	hw->data_setup_in_cycles = 1;
+	hw->data_hold_in_cycles = 1;
+	hw->address_setup_in_cycles = ((mode == 5) ? 1 : 0);
+
+	/* [2] for GPMI_HW_GPMI_TIMING1 */
+	hw->device_busy_timeout = 0x9000;
+
+	/* [3] for GPMI_HW_GPMI_CTRL1 */
+	hw->wrn_dly_sel = BV_GPMI_CTRL1_WRN_DLY_SEL_NO_DELAY;
+
+	if (GPMI_IS_MX6Q(this))
+		dll_threshold = 12;
+
+	/*
+	 * Enlarge 10 times for the numerator and denominator in {3}.
+	 * This make us to get more accurate result.
+	 */
+	clk_period = NSEC_PER_SEC / (rate / 10);
+	dll_threshold *= 10;
+	t_rea = ((mode == 5) ? 16 : 20) * 10;
+	c *= 10;
+
+	t_rp = clk_period * 1; /* DATA_SETUP is 1 */
+
+	if (clk_period > dll_threshold) {
+		hw->use_half_periods = 1;
+		rp = clk_period / 2;
+	} else {
+		hw->use_half_periods = 0;
+		rp = clk_period;
+	}
+
+	/*
+	 * Multiply the numerator with 10, we could do a round off:
+	 *      7.8 round up to 8; 7.4 round down to 7.
+	 */
+	delay  = (((t_rea + c - t_rp) * 8) * 10) / rp;
+	delay = (delay + 5) / 10;
+
+	hw->sample_delay_factor = delay;
+}
+
+static int enable_edo_mode(struct gpmi_nand_data *this, int mode)
+{
+	struct resources  *r = &this->resources;
+	struct nand_chip *nand = &this->nand;
+	struct mtd_info	 *mtd = &this->mtd;
+	uint8_t feature[ONFI_SUBFEATURE_PARAM_LEN] = {};
+	unsigned long rate;
+	int ret;
+
+	nand->select_chip(mtd, 0);
+
+	/* [1] send SET FEATURE commond to NAND */
+	feature[0] = mode;
+	ret = nand->onfi_set_features(mtd, nand,
+				ONFI_FEATURE_ADDR_TIMING_MODE, feature);
+	if (ret)
+		goto err_out;
+
+	/* [2] send GET FEATURE command to double-check the timing mode */
+	memset(feature, 0, ONFI_SUBFEATURE_PARAM_LEN);
+	ret = nand->onfi_get_features(mtd, nand,
+				ONFI_FEATURE_ADDR_TIMING_MODE, feature);
+	if (ret || feature[0] != mode)
+		goto err_out;
+
+	nand->select_chip(mtd, -1);
+
+	/* [3] set the main IO clock, 100MHz for mode 5, 80MHz for mode 4. */
+	rate = (mode == 5) ? 100000000 : 80000000;
+	clk_set_rate(r->clock[0], rate);
+
+	/* Let the gpmi_begin() re-compute the timing again. */
+	this->flags &= ~GPMI_TIMING_INIT_OK;
+
+	this->flags |= GPMI_ASYNC_EDO_ENABLED;
+	this->timing_mode = mode;
+	dev_info(this->dev, "enable the asynchronous EDO mode %d\n", mode);
+	return 0;
+
+err_out:
+	nand->select_chip(mtd, -1);
+	dev_err(this->dev, "mode:%d ,failed in set feature.\n", mode);
+	return -EINVAL;
+}
+
+int gpmi_extra_init(struct gpmi_nand_data *this)
+{
+	struct nand_chip *chip = &this->nand;
+
+	/* Enable the asynchronous EDO feature. */
+	if (GPMI_IS_MX6Q(this) && chip->onfi_version) {
+		int mode = onfi_get_async_timing_mode(chip);
+
+		/* We only support the timing mode 4 and mode 5. */
+		if (mode & ONFI_TIMING_MODE_5)
+			mode = 5;
+		else if (mode & ONFI_TIMING_MODE_4)
+			mode = 4;
+		else
+			return 0;
+
+		return enable_edo_mode(this, mode);
+	}
 	return 0;
 }
 
@@ -1156,35 +970,29 @@ return_results:
 void gpmi_begin(struct gpmi_nand_data *this)
 {
 	struct resources *r = &this->resources;
-	unsigned char  *gpmi_regs = r->gpmi_regs;
+	void __iomem *gpmi_regs = r->gpmi_regs;
 	unsigned int   clock_period_in_ns;
 	uint32_t       reg;
 	unsigned int   dll_wait_time_in_us;
-	struct gpmi_nfc_hardware_timing  hw = {};
+	struct gpmi_nfc_hardware_timing  hw;
 	int ret;
 
 	/* Enable the clock. */
-	ret = clk_prepare_enable(r->clock);
+	ret = gpmi_enable_clk(this);
 	if (ret) {
 		pr_err("We failed in enable the clk\n");
 		goto err_out;
 	}
-	if (!clk_get_usecount(mxs_dma_clk)) {
-		ret = clk_prepare_enable(mxs_dma_clk);
-		if (ret) {
-			pr_err("We failed in enable the dma clk\n");
-			goto err_out;
-		}
-	}
 
-	if (this->flags & ASYNC_EDO_ENABLED) {
-		if (this->flags & ASYNC_EDO_TIMING_CONFIGED)
-			return;
-		set_edo_timing(this, &hw);
-		this->flags |= ASYNC_EDO_TIMING_CONFIGED;
-	} else {
+	/* Only initialize the timing once */
+	if (this->flags & GPMI_TIMING_INIT_OK)
+		return;
+	this->flags |= GPMI_TIMING_INIT_OK;
+
+	if (this->flags & GPMI_ASYNC_EDO_ENABLED)
+		gpmi_compute_edo_timing(this, &hw);
+	else
 		gpmi_nfc_compute_hardware_timing(this, &hw);
-	}
 
 	/* [1] Set HW_GPMI_TIMING0 */
 	reg = BF_GPMI_TIMING0_ADDRESS_SETUP(hw.address_setup_in_cycles) |
@@ -1194,10 +1002,12 @@ void gpmi_begin(struct gpmi_nand_data *this)
 	writel(reg, gpmi_regs + HW_GPMI_TIMING0);
 
 	/* [2] Set HW_GPMI_TIMING1 */
-	writel(BF_GPMI_TIMING1_DEVICE_BUSY_TIMEOUT(hw.device_busy_timeout),
+	writel(BF_GPMI_TIMING1_BUSY_TIMEOUT(hw.device_busy_timeout),
 		gpmi_regs + HW_GPMI_TIMING1);
 
 	/* [3] The following code is to set the HW_GPMI_CTRL1. */
+
+	/* Set the WRN_DLY_SEL */
 	writel(BM_GPMI_CTRL1_WRN_DLY_SEL, gpmi_regs + HW_GPMI_CTRL1_CLR);
 	writel(BF_GPMI_CTRL1_WRN_DLY_SEL(hw.wrn_dly_sel),
 					gpmi_regs + HW_GPMI_CTRL1_SET);
@@ -1206,18 +1016,20 @@ void gpmi_begin(struct gpmi_nand_data *this)
 	writel(BM_GPMI_CTRL1_DLL_ENABLE, gpmi_regs + HW_GPMI_CTRL1_CLR);
 
 	/* Clear out the DLL control fields. */
-	writel(BM_GPMI_CTRL1_RDN_DELAY,   gpmi_regs + HW_GPMI_CTRL1_CLR);
-	writel(BM_GPMI_CTRL1_HALF_PERIOD, gpmi_regs + HW_GPMI_CTRL1_CLR);
+	reg = BM_GPMI_CTRL1_RDN_DELAY | BM_GPMI_CTRL1_HALF_PERIOD;
+	writel(reg, gpmi_regs + HW_GPMI_CTRL1_CLR);
 
 	/* If no sample delay is called for, return immediately. */
 	if (!hw.sample_delay_factor)
 		return;
 
-	if (hw.use_half_periods)
-		writel(BM_GPMI_CTRL1_HALF_PERIOD,
-					gpmi_regs + HW_GPMI_CTRL1_SET);
-	writel(BF_GPMI_CTRL1_RDN_DELAY(hw.sample_delay_factor),
-					gpmi_regs + HW_GPMI_CTRL1_SET);
+	/* Set RDN_DELAY or HALF_PERIOD. */
+	reg = ((hw.use_half_periods) ? BM_GPMI_CTRL1_HALF_PERIOD : 0)
+		| BF_GPMI_CTRL1_RDN_DELAY(hw.sample_delay_factor);
+
+	writel(reg, gpmi_regs + HW_GPMI_CTRL1_SET);
+
+	/* At last, we enable the DLL. */
 	writel(BM_GPMI_CTRL1_DLL_ENABLE, gpmi_regs + HW_GPMI_CTRL1_SET);
 
 	/*
@@ -1225,11 +1037,13 @@ void gpmi_begin(struct gpmi_nand_data *this)
 	 * we can use the GPMI. Calculate the amount of time we need to wait,
 	 * in microseconds.
 	 */
-	clock_period_in_ns = 1000000000 / clk_get_rate(r->clock);
-
+	clock_period_in_ns = NSEC_PER_SEC / clk_get_rate(r->clock[0]);
 	dll_wait_time_in_us = (clock_period_in_ns * 64) / 1000;
+
 	if (!dll_wait_time_in_us)
 		dll_wait_time_in_us = 1;
+
+	/* Wait for the DLL to settle. */
 	udelay(dll_wait_time_in_us);
 
 err_out:
@@ -1238,10 +1052,7 @@ err_out:
 
 void gpmi_end(struct gpmi_nand_data *this)
 {
-	struct resources *r = &this->resources;
-	clk_disable_unprepare(r->clock);
-	if (clk_get_usecount(mxs_dma_clk))
-		clk_disable_unprepare(mxs_dma_clk);
+	gpmi_disable_clk(this);
 }
 
 /* Clears a BCH interrupt. */
@@ -1294,7 +1105,7 @@ int gpmi_send_command(struct gpmi_nand_data *this)
 		| BM_GPMI_CTRL0_ADDRESS_INCREMENT
 		| BF_GPMI_CTRL0_XFER_COUNT(this->command_length);
 	pio[1] = pio[2] = 0;
-	desc = channel->device->device_prep_slave_sg(channel,
+	desc = dmaengine_prep_slave_sg(channel,
 					(struct scatterlist *)pio,
 					ARRAY_SIZE(pio), DMA_TRANS_NONE, 0);
 	if (!desc) {
@@ -1307,7 +1118,7 @@ int gpmi_send_command(struct gpmi_nand_data *this)
 
 	sg_init_one(sgl, this->cmd_buffer, this->command_length);
 	dma_map_sg(this->dev, sgl, 1, DMA_TO_DEVICE);
-	desc = channel->device->device_prep_slave_sg(channel,
+	desc = dmaengine_prep_slave_sg(channel,
 				sgl, 1, DMA_MEM_TO_DEV,
 				DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 
@@ -1341,8 +1152,7 @@ int gpmi_send_data(struct gpmi_nand_data *this)
 		| BF_GPMI_CTRL0_ADDRESS(address)
 		| BF_GPMI_CTRL0_XFER_COUNT(this->upper_len);
 	pio[1] = 0;
-	desc = channel->device->device_prep_slave_sg(channel,
-					(struct scatterlist *)pio,
+	desc = dmaengine_prep_slave_sg(channel, (struct scatterlist *)pio,
 					ARRAY_SIZE(pio), DMA_TRANS_NONE, 0);
 	if (!desc) {
 		pr_err("step 1 error\n");
@@ -1351,7 +1161,7 @@ int gpmi_send_data(struct gpmi_nand_data *this)
 
 	/* [2] send DMA request */
 	prepare_data_dma(this, DMA_TO_DEVICE);
-	desc = channel->device->device_prep_slave_sg(channel, &this->data_sgl,
+	desc = dmaengine_prep_slave_sg(channel, &this->data_sgl,
 					1, DMA_MEM_TO_DEV,
 					DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 	if (!desc) {
@@ -1378,7 +1188,7 @@ int gpmi_read_data(struct gpmi_nand_data *this)
 		| BF_GPMI_CTRL0_ADDRESS(BV_GPMI_CTRL0_ADDRESS__NAND_DATA)
 		| BF_GPMI_CTRL0_XFER_COUNT(this->upper_len);
 	pio[1] = 0;
-	desc = channel->device->device_prep_slave_sg(channel,
+	desc = dmaengine_prep_slave_sg(channel,
 					(struct scatterlist *)pio,
 					ARRAY_SIZE(pio), DMA_TRANS_NONE, 0);
 	if (!desc) {
@@ -1388,7 +1198,7 @@ int gpmi_read_data(struct gpmi_nand_data *this)
 
 	/* [2] : send DMA request */
 	prepare_data_dma(this, DMA_FROM_DEVICE);
-	desc = channel->device->device_prep_slave_sg(channel, &this->data_sgl,
+	desc = dmaengine_prep_slave_sg(channel, &this->data_sgl,
 					1, DMA_DEV_TO_MEM,
 					DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 	if (!desc) {
@@ -1409,21 +1219,10 @@ int gpmi_send_page(struct gpmi_nand_data *this,
 	uint32_t address;
 	uint32_t ecc_command;
 	uint32_t buffer_mask;
-	uint32_t busw;
-	uint32_t page_size;
 	struct dma_async_tx_descriptor *desc;
 	struct dma_chan *channel = get_dma_chan(this);
 	int chip = this->current_chip;
 	u32 pio[6];
-
-	/* DDR use the 16-bit for DATA transmission! */
-	if (is_board_support_ddr(this) && is_ddr_nand(this)) {
-		busw		= BV_GPMI_CTRL0_WORD_LENGTH__16_BIT;
-		page_size	= geo->page_size >> 1;
-	} else {
-		busw		= BM_GPMI_CTRL0_WORD_LENGTH;
-		page_size	= geo->page_size;
-	}
 
 	/* A DMA descriptor that does an ECC page read. */
 	command_mode = BV_GPMI_CTRL0_COMMAND_MODE__WRITE;
@@ -1433,7 +1232,7 @@ int gpmi_send_page(struct gpmi_nand_data *this,
 				BV_GPMI_ECCCTRL_BUFFER_MASK__BCH_AUXONLY;
 
 	pio[0] = BF_GPMI_CTRL0_COMMAND_MODE(command_mode)
-		| busw
+		| BM_GPMI_CTRL0_WORD_LENGTH
 		| BF_GPMI_CTRL0_CS(chip, this)
 		| BF_GPMI_CTRL0_LOCK_CS(LOCK_CS_ENABLE, this)
 		| BF_GPMI_CTRL0_ADDRESS(address)
@@ -1442,11 +1241,11 @@ int gpmi_send_page(struct gpmi_nand_data *this,
 	pio[2] = BM_GPMI_ECCCTRL_ENABLE_ECC
 		| BF_GPMI_ECCCTRL_ECC_CMD(ecc_command)
 		| BF_GPMI_ECCCTRL_BUFFER_MASK(buffer_mask);
-	pio[3] = page_size;
+	pio[3] = geo->page_size;
 	pio[4] = payload;
 	pio[5] = auxiliary;
 
-	desc = channel->device->device_prep_slave_sg(channel,
+	desc = dmaengine_prep_slave_sg(channel,
 					(struct scatterlist *)pio,
 					ARRAY_SIZE(pio), DMA_TRANS_NONE,
 					DMA_CTRL_ACK);
@@ -1466,35 +1265,23 @@ int gpmi_read_page(struct gpmi_nand_data *this,
 	uint32_t address;
 	uint32_t ecc_command;
 	uint32_t buffer_mask;
-	uint32_t page_size;
-	uint32_t busw;
 	struct dma_async_tx_descriptor *desc;
 	struct dma_chan *channel = get_dma_chan(this);
 	int chip = this->current_chip;
-	unsigned long flags;
 	u32 pio[6];
-
-	/* DDR use the 16-bit for DATA transmission! */
-	if (is_board_support_ddr(this) && is_ddr_nand(this)) {
-		busw		= BV_GPMI_CTRL0_WORD_LENGTH__16_BIT;
-		page_size	= geo->page_size >> 1;
-	} else {
-		busw		= BM_GPMI_CTRL0_WORD_LENGTH;
-		page_size	= geo->page_size;
-	}
 
 	/* [1] Wait for the chip to report ready. */
 	command_mode = BV_GPMI_CTRL0_COMMAND_MODE__WAIT_FOR_READY;
 	address      = BV_GPMI_CTRL0_ADDRESS__NAND_DATA;
 
 	pio[0] =  BF_GPMI_CTRL0_COMMAND_MODE(command_mode)
-		| busw
+		| BM_GPMI_CTRL0_WORD_LENGTH
 		| BF_GPMI_CTRL0_CS(chip, this)
 		| BF_GPMI_CTRL0_LOCK_CS(LOCK_CS_ENABLE, this)
 		| BF_GPMI_CTRL0_ADDRESS(address)
 		| BF_GPMI_CTRL0_XFER_COUNT(0);
 	pio[1] = 0;
-	desc = channel->device->device_prep_slave_sg(channel,
+	desc = dmaengine_prep_slave_sg(channel,
 				(struct scatterlist *)pio, 2,
 				DMA_TRANS_NONE, 0);
 	if (!desc) {
@@ -1510,7 +1297,7 @@ int gpmi_read_page(struct gpmi_nand_data *this,
 			| BV_GPMI_ECCCTRL_BUFFER_MASK__BCH_AUXONLY;
 
 	pio[0] =  BF_GPMI_CTRL0_COMMAND_MODE(command_mode)
-		| busw
+		| BM_GPMI_CTRL0_WORD_LENGTH
 		| BF_GPMI_CTRL0_CS(chip, this)
 		| BF_GPMI_CTRL0_LOCK_CS(LOCK_CS_ENABLE, this)
 		| BF_GPMI_CTRL0_ADDRESS(address)
@@ -1520,17 +1307,13 @@ int gpmi_read_page(struct gpmi_nand_data *this,
 	pio[2] =  BM_GPMI_ECCCTRL_ENABLE_ECC
 		| BF_GPMI_ECCCTRL_ECC_CMD(ecc_command)
 		| BF_GPMI_ECCCTRL_BUFFER_MASK(buffer_mask);
-	pio[3] = page_size;
+	pio[3] = geo->page_size;
 	pio[4] = payload;
 	pio[5] = auxiliary;
-
-	/* Set DMA_CTRL_ACK for MX6Q which uses the new GPMI. */
-	flags = DMA_PREP_INTERRUPT;
-	if (GPMI_IS_MX6Q(this))
-		flags |= DMA_CTRL_ACK;
-	desc = channel->device->device_prep_slave_sg(channel,
+	desc = dmaengine_prep_slave_sg(channel,
 					(struct scatterlist *)pio,
-					ARRAY_SIZE(pio), DMA_TRANS_NONE, flags);
+					ARRAY_SIZE(pio), DMA_TRANS_NONE,
+					DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 	if (!desc) {
 		pr_err("step 2 error\n");
 		return -1;
@@ -1541,14 +1324,14 @@ int gpmi_read_page(struct gpmi_nand_data *this,
 	address      = BV_GPMI_CTRL0_ADDRESS__NAND_DATA;
 
 	pio[0] = BF_GPMI_CTRL0_COMMAND_MODE(command_mode)
-		| busw
+		| BM_GPMI_CTRL0_WORD_LENGTH
 		| BF_GPMI_CTRL0_CS(chip, this)
 		| BF_GPMI_CTRL0_LOCK_CS(LOCK_CS_ENABLE, this)
 		| BF_GPMI_CTRL0_ADDRESS(address)
-		| BF_GPMI_CTRL0_XFER_COUNT(page_size);
+		| BF_GPMI_CTRL0_XFER_COUNT(geo->page_size);
 	pio[1] = 0;
-	pio[2] = 0; /* set GPMI_HW_GPMI_ECCCTRL, disable the BCH */
-	desc = channel->device->device_prep_slave_sg(channel,
+	pio[2] = 0; /* clear GPMI_HW_GPMI_ECCCTRL, disable the BCH. */
+	desc = dmaengine_prep_slave_sg(channel,
 				(struct scatterlist *)pio, 3,
 				DMA_TRANS_NONE,
 				DMA_PREP_INTERRUPT | DMA_CTRL_ACK);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,7 +16,6 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  *
  */
-
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -33,14 +32,13 @@
 #include <linux/regulator/machine.h>
 #include <asm/mach-types.h>
 
-#include <mach/clock.h>
-#include <mach/mxc_hdmi.h>
-#include <mach/ipu-v3.h>
-#include <mach/mxc_edid.h>
+#include <video/mxc_hdmi.h>
+#include <linux/ipu-v3.h>
+#include <video/mxc_edid.h>
 #include "../mxc/ipu3/ipu_prv.h"
 #include <linux/mfd/mxc-hdmi-core.h>
-#include <linux/fsl_devices.h>
-#include <mach/hardware.h>
+#include <linux/of_device.h>
+#include <linux/mod_devicetable.h>
 #include <linux/mfd/mxc-hdmi-core.h>
 
 struct mxc_hdmi_data {
@@ -50,7 +48,7 @@ struct mxc_hdmi_data {
 	struct device *dev;
 };
 
-static unsigned long hdmi_base;
+static void __iomem *hdmi_base;
 static struct clk *isfr_clk;
 static struct clk *iahb_clk;
 static spinlock_t irq_spinlock;
@@ -68,7 +66,6 @@ static struct snd_pcm_substream *hdmi_audio_stream_playback;
 static unsigned int hdmi_cable_state;
 static unsigned int hdmi_blank_state;
 static spinlock_t hdmi_audio_lock, hdmi_blank_state_lock, hdmi_cable_state_lock;
-
 
 unsigned int hdmi_set_cable_state(unsigned int state)
 {
@@ -182,8 +179,6 @@ u8 hdmi_readb(unsigned int reg)
 
 	value = __raw_readb(hdmi_base + reg);
 
-/*	pr_debug("hdmi rd: 0x%04x = 0x%02x\n", reg, value);*/
-
 	return value;
 }
 EXPORT_SYMBOL(hdmi_readb);
@@ -220,7 +215,6 @@ EXPORT_SYMBOL(hdmi_check_overflow);
 void hdmi_writeb(u8 value, unsigned int reg)
 {
 	hdmi_check_overflow();
-/*	pr_debug("hdmi wr: 0x%04x = 0x%02x\n", reg, value);*/
 	__raw_writeb(value, hdmi_base + reg);
 	hdmi_check_overflow();
 }
@@ -516,12 +510,28 @@ static void hdmi_set_clk_regenerator(void)
 	hdmi_set_clock_regenerator_n(clk_n);
 }
 
-unsigned int hdmi_SDMA_check(void)
+static int hdmi_core_get_of_property(struct platform_device *pdev)
 {
-	return (mx6q_revision() > IMX_CHIP_REVISION_1_1) ||
-			(mx6dl_revision() > IMX_CHIP_REVISION_1_0);
+	struct device_node *np = pdev->dev.of_node;
+	int err;
+	int ipu_id, disp_id;
+
+	err = of_property_read_u32(np, "ipu_id", &ipu_id);
+	if (err) {
+		dev_dbg(&pdev->dev, "get of property ipu_id fail\n");
+		return err;
+	}
+	err = of_property_read_u32(np, "disp_id", &disp_id);
+	if (err) {
+		dev_dbg(&pdev->dev, "get of property disp_id fail\n");
+		return err;
+	}
+
+	mxc_hdmi_ipu_id = ipu_id;
+	mxc_hdmi_disp_id = disp_id;
+
+	return err;
 }
-EXPORT_SYMBOL(hdmi_SDMA_check);
 
 /* Need to run this before phy is enabled the first time to prevent
  * overflow condition in HDMI_IH_FC_STAT2 */
@@ -590,7 +600,6 @@ EXPORT_SYMBOL(hdmi_get_registered);
 
 static int mxc_hdmi_core_probe(struct platform_device *pdev)
 {
-	struct fsl_mxc_hdmi_core_platform_data *pdata = pdev->dev.platform_data;
 	struct mxc_hdmi_data *hdmi_data;
 	struct resource *res;
 	unsigned long flags;
@@ -608,7 +617,13 @@ static int mxc_hdmi_core_probe(struct platform_device *pdev)
 	if (!res)
 		return -ENOENT;
 
-	hdmi_data = kzalloc(sizeof(struct mxc_hdmi_data), GFP_KERNEL);
+	ret = hdmi_core_get_of_property(pdev);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "get hdmi of property fail\n");
+		return -ENOENT;
+	}
+
+	hdmi_data = devm_kzalloc(&pdev->dev, sizeof(struct mxc_hdmi_data), GFP_KERNEL);
 	if (!hdmi_data) {
 		dev_err(&pdev->dev, "Couldn't allocate mxc hdmi mfd device\n");
 		return -ENOMEM;
@@ -640,7 +655,7 @@ static int mxc_hdmi_core_probe(struct platform_device *pdev)
 	hdmi_audio_stream_playback = NULL;
 	spin_unlock_irqrestore(&hdmi_audio_lock, flags);
 
-	isfr_clk = clk_get(&hdmi_data->pdev->dev, "hdmi_isfr_clk");
+	isfr_clk = clk_get(&hdmi_data->pdev->dev, "hdmi_isfr");
 	if (IS_ERR(isfr_clk)) {
 		ret = PTR_ERR(isfr_clk);
 		dev_err(&hdmi_data->pdev->dev,
@@ -648,7 +663,7 @@ static int mxc_hdmi_core_probe(struct platform_device *pdev)
 		goto eclkg;
 	}
 
-	ret = clk_enable(isfr_clk);
+	ret = clk_prepare_enable(isfr_clk);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Cannot enable HDMI clock: %d\n", ret);
 		goto eclke;
@@ -657,7 +672,7 @@ static int mxc_hdmi_core_probe(struct platform_device *pdev)
 	pr_debug("%s isfr_clk:%d\n", __func__,
 		(int)clk_get_rate(isfr_clk));
 
-	iahb_clk = clk_get(&hdmi_data->pdev->dev, "hdmi_iahb_clk");
+	iahb_clk = clk_get(&hdmi_data->pdev->dev, "hdmi_iahb");
 	if (IS_ERR(iahb_clk)) {
 		ret = PTR_ERR(iahb_clk);
 		dev_err(&hdmi_data->pdev->dev,
@@ -665,7 +680,7 @@ static int mxc_hdmi_core_probe(struct platform_device *pdev)
 		goto eclkg2;
 	}
 
-	ret = clk_enable(iahb_clk);
+	ret = clk_prepare_enable(iahb_clk);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Cannot enable HDMI clock: %d\n", ret);
 		goto eclke2;
@@ -685,18 +700,15 @@ static int mxc_hdmi_core_probe(struct platform_device *pdev)
 		ret = -ENOMEM;
 		goto eirq;
 	}
-	hdmi_base = (unsigned long)hdmi_data->reg_base;
+	hdmi_base = hdmi_data->reg_base;
 
 	pr_debug("\n%s hdmi hw base = 0x%08x\n\n", __func__, (int)res->start);
-
-	mxc_hdmi_ipu_id = pdata->ipu_id;
-	mxc_hdmi_disp_id = pdata->disp_id;
 
 	initialize_hdmi_ih_mutes();
 
 	/* Disable HDMI clocks until video/audio sub-drivers are initialized */
-	clk_disable(isfr_clk);
-	clk_disable(iahb_clk);
+	clk_disable_unprepare(isfr_clk);
+	clk_disable_unprepare(iahb_clk);
 
 	/* Replace platform data coming in with a local struct */
 	platform_set_drvdata(pdev, hdmi_data);
@@ -706,15 +718,14 @@ static int mxc_hdmi_core_probe(struct platform_device *pdev)
 eirq:
 	release_mem_region(res->start, resource_size(res));
 emem:
-	clk_disable(iahb_clk);
+	clk_disable_unprepare(iahb_clk);
 eclke2:
 	clk_put(iahb_clk);
 eclkg2:
-	clk_disable(isfr_clk);
+	clk_disable_unprepare(isfr_clk);
 eclke:
 	clk_put(isfr_clk);
 eclkg:
-	kfree(hdmi_data);
 	return ret;
 }
 
@@ -727,14 +738,19 @@ static int __exit mxc_hdmi_core_remove(struct platform_device *pdev)
 	iounmap(hdmi_data->reg_base);
 	release_mem_region(res->start, resource_size(res));
 
-	kfree(hdmi_data);
-
 	return 0;
 }
+
+static const struct of_device_id imx_hdmi_dt_ids[] = {
+	{ .compatible = "fsl,imx6q-hdmi-core", },
+	{ .compatible = "fsl,imx6dl-hdmi-core", },
+	{ /* sentinel */ }
+};
 
 static struct platform_driver mxc_hdmi_core_driver = {
 	.driver = {
 		.name = "mxc_hdmi_core",
+		.of_match_table	= imx_hdmi_dt_ids,
 		.owner = THIS_MODULE,
 	},
 	.remove = __exit_p(mxc_hdmi_core_remove),

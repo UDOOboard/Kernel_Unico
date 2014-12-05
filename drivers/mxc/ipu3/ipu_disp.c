@@ -1,5 +1,5 @@
 /*
- * Copyright 2005-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2005-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -19,19 +19,21 @@
  * @ingroup IPU
  */
 
-#include <linux/types.h>
-#include <linux/errno.h>
-#include <linux/delay.h>
-#include <linux/spinlock.h>
-#include <linux/io.h>
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
+#include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/errno.h>
+#include <linux/io.h>
+#include <linux/ipu-v3.h>
+#include <linux/module.h>
+#include <linux/spinlock.h>
+#include <linux/types.h>
+
 #include <asm/atomic.h>
-#include <mach/clock.h>
-#include <mach/ipu-v3.h>
-#include "ipu_prv.h"
-#include "ipu_regs.h"
+
 #include "ipu_param_mem.h"
+#include "ipu_regs.h"
 
 struct dp_csc_param_t {
 	int mode;
@@ -46,200 +48,6 @@ struct dp_csc_param_t {
 #define DC_DISP_ID_SYNC(di)	(di)
 #define DC_DISP_ID_SERIAL	2
 #define DC_DISP_ID_ASYNC	3
-
-static inline struct ipu_soc *pixelclk2ipu(struct clk *clk)
-{
-	struct ipu_soc *ipu;
-	struct clk *base = clk - clk->id;
-
-	ipu = container_of(base, struct ipu_soc, pixel_clk[0]);
-
-	return ipu;
-}
-
-static unsigned long _ipu_pixel_clk_get_rate(struct clk *clk)
-{
-	struct ipu_soc *ipu = pixelclk2ipu(clk);
-	u32 div;
-	u64 final_rate = clk_get_rate(clk->parent) * 16;
-
-	_ipu_get(ipu);
-	div = ipu_di_read(ipu, clk->id, DI_BS_CLKGEN0);
-	_ipu_put(ipu);
-
-	if (div == 0)
-		return 0;
-	do_div(final_rate, div);
-	return (unsigned long)final_rate;
-}
-
-static unsigned long _ipu_pixel_clk_round_rate(struct clk *clk, unsigned long rate)
-{
-	u64 div, final_rate;
-	u32 remainder;
-	u64 parent_rate = (unsigned long long)clk_get_rate(clk->parent) * 16;
-	/*
-	 * Calculate divider
-	 * Fractional part is 4 bits,
-	 * so simply multiply by 2^4 to get fractional part.
-	 */
-	div = parent_rate;
-	remainder = do_div(div, rate);
-	/* Round the divider value */
-	if (remainder > (rate/2))
-		div++;
-	if (div < 0x10)            /* Min DI disp clock divider is 1 */
-		div = 0x10;
-	if (div & ~0xFEF)
-		div &= 0xFF8;
-	else {
-		/* Round up divider if it gets us closer to desired pix clk */
-		if ((div & 0xC) == 0xC) {
-			div += 0x10;
-			div &= ~0xF;
-		}
-	}
-	final_rate = parent_rate;
-	do_div(final_rate, div);
-	return final_rate;
-}
-
-static int _ipu_pixel_clk_set_rate(struct clk *clk, unsigned long rate)
-{
-	u64 div, parent_rate;
-	u32 remainder;
-	struct ipu_soc *ipu = pixelclk2ipu(clk);
-
-	parent_rate = (unsigned long long)clk_get_rate(clk->parent) * 16;
-	div = parent_rate;
-	remainder = do_div(div, rate);
-	/* Round the divider value */
-	if (remainder > (rate/2))
-		div++;
-
-	/* Round up divider if it gets us closer to desired pix clk */
-	if ((div & 0xC) == 0xC) {
-		div += 0x10;
-		div &= ~0xF;
-	}
-
-	ipu_di_write(ipu, clk->id, (u32)div, DI_BS_CLKGEN0);
-
-	/* Setup pixel clock timing */
-	/* FIXME: needs to be more flexible */
-	/* Down time is half of period */
-	ipu_di_write(ipu, clk->id, ((u32)div / 16) << 16, DI_BS_CLKGEN1);
-
-	return 0;
-}
-
-static int _ipu_pixel_clk_enable(struct clk *clk)
-{
-	struct ipu_soc *ipu = pixelclk2ipu(clk);
-	u32 disp_gen = ipu_cm_read(ipu, IPU_DISP_GEN);
-	disp_gen |= clk->id ? DI1_COUNTER_RELEASE : DI0_COUNTER_RELEASE;
-	ipu_cm_write(ipu, disp_gen, IPU_DISP_GEN);
-
-	return 0;
-}
-
-static void _ipu_pixel_clk_disable(struct clk *clk)
-{
-	struct ipu_soc *ipu = pixelclk2ipu(clk);
-
-	u32 disp_gen = ipu_cm_read(ipu, IPU_DISP_GEN);
-	disp_gen &= clk->id ? ~DI1_COUNTER_RELEASE : ~DI0_COUNTER_RELEASE;
-	ipu_cm_write(ipu, disp_gen, IPU_DISP_GEN);
-}
-
-static int _ipu_pixel_clk_set_parent(struct clk *clk, struct clk *parent)
-{
-	struct ipu_soc *ipu = pixelclk2ipu(clk);
-	u32 di_gen;
-
-	di_gen = ipu_di_read(ipu, clk->id, DI_GENERAL);
-	if (parent == ipu->ipu_clk)
-		di_gen &= ~DI_GEN_DI_CLK_EXT;
-	else if (!IS_ERR(ipu->di_clk[clk->id]) && parent == ipu->di_clk[clk->id])
-		di_gen |= DI_GEN_DI_CLK_EXT;
-	else {
-		return -EINVAL;
-	}
-
-	ipu_di_write(ipu, clk->id, di_gen, DI_GENERAL);
-	return 0;
-}
-
-#ifdef CONFIG_CLK_DEBUG
-#define __INIT_CLK_DEBUG(n)    .name = #n,
-#else
-#define __INIT_CLK_DEBUG(n)
-#endif
-struct clk ipu_pixel_clk[MXC_IPU_MAX_NUM][MXC_DI_NUM_PER_IPU] = {
-	{
-		{
-		 __INIT_CLK_DEBUG(ipu1_pixel_clk_0)
-		 .id = 0,
-		 .get_rate = _ipu_pixel_clk_get_rate,
-		 .set_rate = _ipu_pixel_clk_set_rate,
-		 .round_rate = _ipu_pixel_clk_round_rate,
-		 .set_parent = _ipu_pixel_clk_set_parent,
-		 .enable = _ipu_pixel_clk_enable,
-		 .disable = _ipu_pixel_clk_disable,
-		},
-		{
-		 __INIT_CLK_DEBUG(ipu1_pixel_clk_1)
-		 .id = 1,
-		 .get_rate = _ipu_pixel_clk_get_rate,
-		 .set_rate = _ipu_pixel_clk_set_rate,
-		 .round_rate = _ipu_pixel_clk_round_rate,
-		 .set_parent = _ipu_pixel_clk_set_parent,
-		 .enable = _ipu_pixel_clk_enable,
-		 .disable = _ipu_pixel_clk_disable,
-		},
-	},
-	{
-		{
-		 __INIT_CLK_DEBUG(ipu2_pixel_clk_0)
-		 .id = 0,
-		 .get_rate = _ipu_pixel_clk_get_rate,
-		 .set_rate = _ipu_pixel_clk_set_rate,
-		 .round_rate = _ipu_pixel_clk_round_rate,
-		 .set_parent = _ipu_pixel_clk_set_parent,
-		 .enable = _ipu_pixel_clk_enable,
-		 .disable = _ipu_pixel_clk_disable,
-		},
-		{
-		 __INIT_CLK_DEBUG(ipu2_pixel_clk_1)
-		 .id = 1,
-		 .get_rate = _ipu_pixel_clk_get_rate,
-		 .set_rate = _ipu_pixel_clk_set_rate,
-		 .round_rate = _ipu_pixel_clk_round_rate,
-		 .set_parent = _ipu_pixel_clk_set_parent,
-		 .enable = _ipu_pixel_clk_enable,
-		 .disable = _ipu_pixel_clk_disable,
-		},
-	},
-};
-
-struct clk_lookup ipu_lookups[MXC_IPU_MAX_NUM][MXC_DI_NUM_PER_IPU] = {
-	{
-		{
-			.con_id = "ipu1_pixel_clk_0",
-		},
-		{
-			.con_id = "ipu1_pixel_clk_1",
-		},
-	},
-	{
-		{
-			.con_id = "ipu2_pixel_clk_0",
-		},
-		{
-			.con_id = "ipu2_pixel_clk_1",
-		},
-	},
-};
 
 int dmfc_type_setup;
 
@@ -928,7 +736,7 @@ void _ipu_dp_dc_enable(struct ipu_soc *ipu, ipu_channel_t channel)
 	reg |= 4 << DC_WR_CH_CONF_PROG_TYPE_OFFSET;
 	ipu_dc_write(ipu, reg, DC_WR_CH_CONF(dc_chan));
 
-	clk_enable(&ipu->pixel_clk[di]);
+	clk_prepare_enable(ipu->pixel_clk[di]);
 }
 
 static irqreturn_t dc_irq_handler(int irq, void *dev_id)
@@ -1238,15 +1046,17 @@ int32_t ipu_init_sync_panel(struct ipu_soc *ipu, int disp, uint32_t pixel_clk,
 	uint32_t field1_offset;
 	uint32_t reg;
 	uint32_t di_gen, vsync_cnt;
-	uint32_t div, rounded_pixel_clk, rounded_parent_clk;
+	uint32_t div, rounded_pixel_clk;
 	uint32_t h_total, v_total;
 	int map;
+	int ret;
+	struct clk *ldb_di0_clk, *ldb_di1_clk;
 	struct clk *di_parent;
 
 	dev_dbg(ipu->dev, "panel size = %d x %d\n", width, height);
 
 	if ((v_sync_width == 0) || (h_sync_width == 0))
-		return EINVAL;
+		return -EINVAL;
 
 	adapt_panel_to_ipu_restricitions(ipu, &v_start_width, &v_sync_width, &v_end_width);
 	h_total = width + h_sync_width + h_start_width + h_end_width;
@@ -1255,18 +1065,42 @@ int32_t ipu_init_sync_panel(struct ipu_soc *ipu, int disp, uint32_t pixel_clk,
 	/* Init clocking */
 	dev_dbg(ipu->dev, "pixel clk = %d\n", pixel_clk);
 
-	di_parent = clk_get_parent(ipu->di_clk[disp]);
-	if (clk_get(NULL, "tve_clk") == di_parent ||
-		clk_get(NULL, "ldb_di0_clk") == di_parent ||
-		clk_get(NULL, "ldb_di1_clk") == di_parent) {
+	di_parent = clk_get_parent(ipu->di_clk_sel[disp]);
+	if (!di_parent) {
+		dev_err(ipu->dev, "get di clk parent fail\n");
+		return -EINVAL;
+	}
+	ldb_di0_clk = clk_get(ipu->dev, "ldb_di0");
+	if (IS_ERR(ldb_di0_clk)) {
+		dev_err(ipu->dev, "clk_get di0 failed");
+		return PTR_ERR(ldb_di0_clk);
+	}
+	ldb_di1_clk = clk_get(ipu->dev, "ldb_di1");
+	if (IS_ERR(ldb_di1_clk)) {
+		dev_err(ipu->dev, "clk_get di1 failed");
+		return PTR_ERR(ldb_di1_clk);
+	}
+
+	if (ldb_di0_clk == di_parent || ldb_di1_clk == di_parent) {
 		/* if di clk parent is tve/ldb, then keep it;*/
 		dev_dbg(ipu->dev, "use special clk parent\n");
-		clk_set_parent(&ipu->pixel_clk[disp], ipu->di_clk[disp]);
+		ret = clk_set_parent(ipu->pixel_clk_sel[disp], ipu->di_clk[disp]);
+		if (ret) {
+			dev_err(ipu->dev, "set pixel clk error:%d\n", ret);
+			return ret;
+		}
+		clk_put(ldb_di0_clk);
+		clk_put(ldb_di1_clk);
 	} else {
 		/* try ipu clk first*/
 		dev_dbg(ipu->dev, "try ipu internal clk\n");
-		clk_set_parent(&ipu->pixel_clk[disp], ipu->ipu_clk);
-		rounded_pixel_clk = clk_round_rate(&ipu->pixel_clk[disp], pixel_clk);
+		ret = clk_set_parent(ipu->pixel_clk_sel[disp], ipu->ipu_clk);
+		if (ret) {
+			dev_err(ipu->dev, "set pixel clk error:%d\n", ret);
+			return ret;
+		}
+		rounded_pixel_clk = clk_round_rate(ipu->pixel_clk[disp], pixel_clk);
+		dev_dbg(ipu->dev, "rounded pix clk:%d\n", rounded_pixel_clk);
 		/*
 		 * we will only use 1/2 fraction for ipu clk,
 		 * so if the clk rate is not fit, try ext clk.
@@ -1275,28 +1109,42 @@ int32_t ipu_init_sync_panel(struct ipu_soc *ipu, int disp, uint32_t pixel_clk,
 			((rounded_pixel_clk >= pixel_clk + pixel_clk/200) ||
 			(rounded_pixel_clk <= pixel_clk - pixel_clk/200))) {
 			dev_dbg(ipu->dev, "try ipu ext di clk\n");
-			rounded_pixel_clk = pixel_clk * 2;
-			rounded_parent_clk = clk_round_rate(di_parent,
-						rounded_pixel_clk);
-			while (rounded_pixel_clk < rounded_parent_clk) {
-				/* the max divider from parent to di is 8 */
-				if (rounded_parent_clk / pixel_clk < 8)
-					rounded_pixel_clk += pixel_clk * 2;
-				else
-					rounded_pixel_clk *= 2;
-			}
-			clk_set_rate(di_parent, rounded_pixel_clk);
+
 			rounded_pixel_clk =
 				clk_round_rate(ipu->di_clk[disp], pixel_clk);
-			clk_set_rate(ipu->di_clk[disp], rounded_pixel_clk);
-			clk_set_parent(&ipu->pixel_clk[disp], ipu->di_clk[disp]);
+			ret = clk_set_rate(ipu->di_clk[disp],
+						rounded_pixel_clk);
+			if (ret) {
+				dev_err(ipu->dev,
+					"set di clk rate error:%d\n", ret);
+				return ret;
+			}
+			dev_dbg(ipu->dev, "di clk:%d\n", rounded_pixel_clk);
+			ret = clk_set_parent(ipu->pixel_clk_sel[disp],
+						ipu->di_clk[disp]);
+			if (ret) {
+				dev_err(ipu->dev,
+					"set pixel clk parent error:%d\n", ret);
+				return ret;
+			}
 		}
 	}
-	rounded_pixel_clk = clk_round_rate(&ipu->pixel_clk[disp], pixel_clk);
-	clk_set_rate(&ipu->pixel_clk[disp], rounded_pixel_clk);
+	rounded_pixel_clk = clk_round_rate(ipu->pixel_clk[disp], pixel_clk);
+	dev_dbg(ipu->dev, "round pixel clk:%d\n", rounded_pixel_clk);
+	ret = clk_set_rate(ipu->pixel_clk[disp], rounded_pixel_clk);
+	if (ret) {
+		dev_err(ipu->dev, "set pixel clk rate error:%d\n", ret);
+		return ret;
+	}
 	msleep(5);
 	/* Get integer portion of divider */
-	div = clk_get_rate(clk_get_parent(&ipu->pixel_clk[disp])) / rounded_pixel_clk;
+	div = clk_get_rate(clk_get_parent(ipu->pixel_clk[disp])) / rounded_pixel_clk;
+	dev_dbg(ipu->dev, "div:%d\n", div);
+	if (!div) {
+		dev_err(ipu->dev, "invalid pixel clk div = 0\n");
+		return -EINVAL;
+	}
+
 
 	mutex_lock(&ipu->mutex_lock);
 
@@ -1316,7 +1164,7 @@ int32_t ipu_init_sync_panel(struct ipu_soc *ipu, int disp, uint32_t pixel_clk,
 	ipu_di_write(ipu, disp, di_gen, DI_GENERAL);
 
 	if (sig.interlaced) {
-		if (g_ipu_hw_rev >= 2) {
+		if (g_ipu_hw_rev >= IPU_V3DEX) {
 			/* Setup internal HSYNC waveform */
 			_ipu_di_sync_config(ipu,
 					disp, 		/* display */
@@ -2105,7 +1953,7 @@ void ipu_reset_disp_panel(struct ipu_soc *ipu)
 }
 EXPORT_SYMBOL(ipu_reset_disp_panel);
 
-void __devinit ipu_disp_init(struct ipu_soc *ipu)
+void ipu_disp_init(struct ipu_soc *ipu)
 {
 	ipu->fg_csc_type = ipu->bg_csc_type = CSC_NONE;
 	ipu->color_key_4rgb = true;

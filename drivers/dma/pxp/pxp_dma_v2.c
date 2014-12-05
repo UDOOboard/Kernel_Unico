@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2010-2013 Freescale Semiconductor, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,6 +37,7 @@
 #include <linux/clk.h>
 #include <linux/workqueue.h>
 #include <linux/sched.h>
+#include <linux/of.h>
 
 #include "regs-pxp_v2.h"
 
@@ -535,7 +536,8 @@ static void pxp_set_lut(struct pxps *pxp)
 		/* LUT address pointer auto-increments after each data write */
 		for (pix_val = 0; pix_val < 256; pix_val += 4) {
 			for (i = 0; i < 4; i++) {
-				entry_src = use_cmap ? cmap[pix_val + i] : pix_val + i;
+				entry_src = use_cmap ?
+					cmap[pix_val + i] : pix_val + i;
 				entry[i] = (entry_src < 0x80) ? 0xFF : 0x00;
 			}
 			reg_val = (entry[3] << 24) | (entry[2] << 16) |
@@ -558,7 +560,8 @@ static void pxp_set_lut(struct pxps *pxp)
 		/* LUT address pointer auto-increments after each data write */
 		for (pix_val = 0; pix_val < 256; pix_val += 4) {
 			for (i = 0; i < 4; i++) {
-				entry_src = use_cmap ? cmap[pix_val + i] : pix_val + i;
+				entry_src = use_cmap ?
+					cmap[pix_val + i] : pix_val + i;
 				entry[i] = ~entry_src & 0xFF;
 			}
 			reg_val = (entry[3] << 24) | (entry[2] << 16) |
@@ -581,7 +584,8 @@ static void pxp_set_lut(struct pxps *pxp)
 		/* LUT address pointer auto-increments after each data write */
 		for (pix_val = 0; pix_val < 256; pix_val += 4) {
 			for (i = 0; i < 4; i++) {
-				entry_src = use_cmap ? cmap[pix_val + i] : pix_val + i;
+				entry_src = use_cmap ?
+					cmap[pix_val + i] : pix_val + i;
 				entry[i] = (entry_src < 0x80) ? 0x00 : 0xFF;
 			}
 			reg_val = (entry[3] << 24) | (entry[2] << 16) |
@@ -748,7 +752,8 @@ static void pxp_set_s0buf(struct pxps *pxp)
 	    s0_params->pixel_fmt == PXP_PIX_FMT_YUV420P)
 		__raw_writel(s0_params->width, pxp->base + HW_PXP_PS_PITCH);
 	else if (s0_params->pixel_fmt == PXP_PIX_FMT_GY04)
-		__raw_writel(s0_params->width >> 1, pxp->base + HW_PXP_PS_PITCH);
+		__raw_writel(s0_params->width >> 1,
+				pxp->base + HW_PXP_PS_PITCH);
 	else
 		__raw_writel(s0_params->width * 2, pxp->base + HW_PXP_PS_PITCH);
 }
@@ -799,7 +804,7 @@ static void pxp_clk_enable(struct pxps *pxp)
 		return;
 	}
 
-	clk_enable(pxp->clk);
+	clk_prepare_enable(pxp->clk);
 	pxp->clk_stat = CLK_STAT_ON;
 
 	mutex_unlock(&pxp->clk_mutex);
@@ -819,7 +824,7 @@ static void pxp_clk_disable(struct pxps *pxp)
 	spin_lock_irqsave(&pxp->lock, flags);
 	if ((pxp->pxp_ongoing == 0) && list_empty(&head)) {
 		spin_unlock_irqrestore(&pxp->lock, flags);
-		clk_disable(pxp->clk);
+		clk_disable_unprepare(pxp->clk);
 		pxp->clk_stat = CLK_STAT_OFF;
 	} else
 		spin_unlock_irqrestore(&pxp->lock, flags);
@@ -1155,9 +1160,11 @@ static struct dma_async_tx_descriptor *pxp_prep_slave_sg(struct dma_chan *chan,
 							 struct scatterlist
 							 *sgl,
 							 unsigned int sg_len,
-							 enum dma_transfer_direction
+							 enum
+							 dma_transfer_direction
 							 direction,
-							 unsigned long tx_flags)
+							 unsigned long tx_flags,
+							 void *context)
 {
 	struct pxp_channel *pxp_chan = to_pxp_channel(chan);
 	struct pxp_dma *pxp_dma = to_pxp_dma(chan->device);
@@ -1523,6 +1530,12 @@ static ssize_t clk_off_timeout_store(struct device *dev,
 static DEVICE_ATTR(clk_off_timeout, 0644, clk_off_timeout_show,
 		   clk_off_timeout_store);
 
+static const struct of_device_id imx_pxpdma_dt_ids[] = {
+	{ .compatible = "fsl,imx6dl-pxp-dma", },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, imx_pxpdma_dt_ids);
+
 static int pxp_probe(struct platform_device *pdev)
 {
 	struct pxps *pxp;
@@ -1537,7 +1550,7 @@ static int pxp_probe(struct platform_device *pdev)
 		goto exit;
 	}
 
-	pxp = kzalloc(sizeof(*pxp), GFP_KERNEL);
+	pxp = devm_kzalloc(&pdev->dev, sizeof(*pxp), GFP_KERNEL);
 	if (!pxp) {
 		dev_err(&pdev->dev, "failed to allocate control object\n");
 		err = -ENOMEM;
@@ -1555,36 +1568,38 @@ static int pxp_probe(struct platform_device *pdev)
 	spin_lock_init(&pxp->lock);
 	mutex_init(&pxp->clk_mutex);
 
-	if (!request_mem_region(res->start, resource_size(res), "pxp-mem")) {
-		err = -EBUSY;
-		goto freepxp;
+	pxp->base = devm_request_and_ioremap(&pdev->dev, res);
+	if (pxp->base == NULL) {
+		dev_err(&pdev->dev, "Couldn't ioremap regs\n");
+		err = -ENODEV;
+		goto exit;
 	}
 
-	pxp->base = ioremap(res->start, SZ_4K);
 	pxp->pdev = pdev;
 
-	pxp->clk = clk_get(NULL, "pxp_axi");
-	clk_enable(pxp->clk);
+	pxp->clk = devm_clk_get(&pdev->dev, "pxp-axi");
+	clk_prepare_enable(pxp->clk);
 
 	err = pxp_hw_init(pxp);
+	clk_disable_unprepare(pxp->clk);
 	if (err) {
 		dev_err(&pdev->dev, "failed to initialize hardware\n");
-		goto release;
+		goto exit;
 	}
-	clk_disable(pxp->clk);
 
-	err = request_irq(pxp->irq, pxp_irq, 0, "pxp-irq", pxp);
+	err = devm_request_irq(&pdev->dev, pxp->irq, pxp_irq, 0,
+				"pxp-dmaengine", pxp);
 	if (err)
-		goto release;
+		goto exit;
 	/* Initialize DMA engine */
 	err = pxp_dma_init(pxp);
 	if (err < 0)
-		goto err_dma_init;
+		goto exit;
 
 	if (device_create_file(&pdev->dev, &dev_attr_clk_off_timeout)) {
 		dev_err(&pdev->dev,
 			"Unable to create file from clk_off_timeout\n");
-		goto err_dma_init;
+		goto exit;
 	}
 	dump_pxp_reg(pxp);
 
@@ -1593,31 +1608,24 @@ static int pxp_probe(struct platform_device *pdev)
 	init_timer(&pxp->clk_timer);
 	pxp->clk_timer.function = pxp_clkoff_timer;
 	pxp->clk_timer.data = (unsigned long)pxp;
+
+	register_pxp_device();
+
 exit:
-	return err;
-err_dma_init:
-	free_irq(pxp->irq, pxp);
-release:
-	release_mem_region(res->start, resource_size(res));
-freepxp:
-	kfree(pxp);
-	dev_err(&pdev->dev, "Exiting (unsuccessfully) pxp_probe function\n");
+	if (err)
+		dev_err(&pdev->dev, "Exiting (unsuccessfully) pxp_probe()\n");
 	return err;
 }
 
-static int __devexit pxp_remove(struct platform_device *pdev)
+static int pxp_remove(struct platform_device *pdev)
 {
 	struct pxps *pxp = platform_get_drvdata(pdev);
 
+	unregister_pxp_device();
 	cancel_work_sync(&pxp->work);
 	del_timer_sync(&pxp->clk_timer);
-	free_irq(pxp->irq, pxp);
-	clk_disable(pxp->clk);
-	clk_put(pxp->clk);
-	iounmap(pxp->base);
+	clk_disable_unprepare(pxp->clk);
 	device_remove_file(&pdev->dev, &dev_attr_clk_off_timeout);
-
-	kfree(pxp);
 
 	return 0;
 }
@@ -1655,27 +1663,17 @@ static int pxp_resume(struct platform_device *pdev)
 
 static struct platform_driver pxp_driver = {
 	.driver = {
-		   .name = "imx-pxp",
+			.name = "imx-pxp",
+			.of_match_table = of_match_ptr(imx_pxpdma_dt_ids),
 		   },
 	.probe = pxp_probe,
-	.remove = __exit_p(pxp_remove),
+	.remove = pxp_remove,
 	.suspend = pxp_suspend,
 	.resume = pxp_resume,
 };
 
-static int __init pxp_init(void)
-{
-	return platform_driver_register(&pxp_driver);
-}
+module_platform_driver(pxp_driver);
 
-subsys_initcall(pxp_init);
-
-static void __exit pxp_exit(void)
-{
-	platform_driver_unregister(&pxp_driver);
-}
-
-module_exit(pxp_exit);
 
 MODULE_DESCRIPTION("i.MX PxP driver");
 MODULE_AUTHOR("Freescale Semiconductor, Inc.");

@@ -128,9 +128,8 @@ static void stop_ep_timer(struct iwch_ep *ep)
 {
 	PDBG("%s ep %p\n", __func__, ep);
 	if (!timer_pending(&ep->timer)) {
-		printk(KERN_ERR "%s timer stopped when its not running!  ep %p state %u\n",
+		WARN(1, "%s timer stopped when its not running!  ep %p state %u\n",
 			__func__, ep, ep->com.state);
-		WARN_ON(1);
 		return;
 	}
 	del_timer_sync(&ep->timer);
@@ -753,6 +752,11 @@ static void connect_request_upcall(struct iwch_ep *ep)
 	event.private_data_len = ep->plen;
 	event.private_data = ep->mpa_pkt + sizeof(struct mpa_message);
 	event.provider_data = ep;
+	/*
+	 * Until ird/ord negotiation via MPAv2 support is added, send max
+	 * supported values
+	 */
+	event.ird = event.ord = 8;
 	if (state_read(&ep->parent_ep->com) != DEAD) {
 		get_ep(&ep->com);
 		ep->parent_ep->com.cm_id->event_handler(
@@ -770,6 +774,11 @@ static void established_upcall(struct iwch_ep *ep)
 	PDBG("%s ep %p\n", __func__, ep);
 	memset(&event, 0, sizeof(event));
 	event.event = IW_CM_EVENT_ESTABLISHED;
+	/*
+	 * Until ird/ord negotiation via MPAv2 support is added, send max
+	 * supported values
+	 */
+	event.ird = event.ord = 8;
 	if (ep->com.cm_id) {
 		PDBG("%s ep %p tid %d\n", __func__, ep, ep->hwtid);
 		ep->com.cm_id->event_handler(ep->com.cm_id, &event);
@@ -1328,7 +1337,6 @@ static int pass_accept_req(struct t3cdev *tdev, struct sk_buff *skb, void *ctx)
 	struct iwch_ep *child_ep, *parent_ep = ctx;
 	struct cpl_pass_accept_req *req = cplhdr(skb);
 	unsigned int hwtid = GET_TID(req);
-	struct neighbour *neigh;
 	struct dst_entry *dst;
 	struct l2t_entry *l2t;
 	struct rtable *rt;
@@ -1365,10 +1373,7 @@ static int pass_accept_req(struct t3cdev *tdev, struct sk_buff *skb, void *ctx)
 		goto reject;
 	}
 	dst = &rt->dst;
-	rcu_read_lock();
-	neigh = dst_get_neighbour(dst);
-	l2t = t3_l2t_get(tdev, neigh, neigh->dev);
-	rcu_read_unlock();
+	l2t = t3_l2t_get(tdev, dst, NULL, &req->peer_ip);
 	if (!l2t) {
 		printk(KERN_ERR MOD "%s - failed to allocate l2t entry!\n",
 		       __func__);
@@ -1674,7 +1679,7 @@ static int close_con_rpl(struct t3cdev *tdev, struct sk_buff *skb, void *ctx)
  * T3A does 3 things when a TERM is received:
  * 1) send up a CPL_RDMA_TERMINATE message with the TERM packet
  * 2) generate an async event on the QP with the TERMINATE opcode
- * 3) post a TERMINATE opcde cqe into the associated CQ.
+ * 3) post a TERMINATE opcode cqe into the associated CQ.
  *
  * For (1), we save the message in the qp for later consumer consumption.
  * For (2), we move the QP into TERMINATE, post a QP event and disconnect.
@@ -1750,9 +1755,8 @@ static void ep_timeout(unsigned long arg)
 		__state_set(&ep->com, ABORTING);
 		break;
 	default:
-		printk(KERN_ERR "%s unexpected state ep %p state %u\n",
+		WARN(1, "%s unexpected state ep %p state %u\n",
 			__func__, ep, ep->com.state);
-		WARN_ON(1);
 		abort = 0;
 	}
 	spin_unlock_irqrestore(&ep->com.lock, flags);
@@ -1879,7 +1883,6 @@ static int is_loopback_dst(struct iw_cm_id *cm_id)
 int iwch_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
 {
 	struct iwch_dev *h = to_iwch_dev(cm_id->device);
-	struct neighbour *neigh;
 	struct iwch_ep *ep;
 	struct rtable *rt;
 	int err = 0;
@@ -1937,13 +1940,8 @@ int iwch_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
 		goto fail3;
 	}
 	ep->dst = &rt->dst;
-
-	rcu_read_lock();
-	neigh = dst_get_neighbour(ep->dst);
-
-	/* get a l2t entry */
-	ep->l2t = t3_l2t_get(ep->com.tdev, neigh, neigh->dev);
-	rcu_read_unlock();
+	ep->l2t = t3_l2t_get(ep->com.tdev, ep->dst, NULL,
+			     &cm_id->remote_addr.sin_addr.s_addr);
 	if (!ep->l2t) {
 		printk(KERN_ERR MOD "%s - cannot alloc l2e.\n", __func__);
 		err = -ENOMEM;

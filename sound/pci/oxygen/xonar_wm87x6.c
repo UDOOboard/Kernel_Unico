@@ -1255,7 +1255,6 @@ static void dump_wm87x6_registers(struct oxygen *chip,
 }
 
 static const struct oxygen_model model_xonar_ds = {
-	.shortname = "Xonar DS",
 	.longname = "Asus Virtuoso 66",
 	.chip = "AV200",
 	.init = xonar_ds_init,
@@ -1275,7 +1274,8 @@ static const struct oxygen_model model_xonar_ds = {
 	.model_data_size = sizeof(struct xonar_wm87x6),
 	.device_config = PLAYBACK_0_TO_I2S |
 			 PLAYBACK_1_TO_SPDIF |
-			 CAPTURE_0_FROM_I2S_1,
+			 CAPTURE_0_FROM_I2S_1 |
+			 CAPTURE_1_FROM_SPDIF,
 	.dac_channels_pcm = 8,
 	.dac_channels_mixer = 8,
 	.dac_volume_min = 255 - 2*60,
@@ -1307,7 +1307,8 @@ static const struct oxygen_model model_xonar_hdav_slim = {
 	.model_data_size = sizeof(struct xonar_wm87x6),
 	.device_config = PLAYBACK_0_TO_I2S |
 			 PLAYBACK_1_TO_SPDIF |
-			 CAPTURE_0_FROM_I2S_1,
+			 CAPTURE_0_FROM_I2S_1 |
+			 CAPTURE_1_FROM_SPDIF,
 	.dac_channels_pcm = 8,
 	.dac_channels_mixer = 2,
 	.dac_volume_min = 255 - 2*60,
@@ -1319,12 +1320,17 @@ static const struct oxygen_model model_xonar_hdav_slim = {
 	.adc_i2s_format = OXYGEN_I2S_FORMAT_LJUST,
 };
 
-int __devinit get_xonar_wm87x6_model(struct oxygen *chip,
-				     const struct pci_device_id *id)
+int get_xonar_wm87x6_model(struct oxygen *chip,
+			   const struct pci_device_id *id)
 {
 	switch (id->subdevice) {
 	case 0x838e:
 		chip->model = model_xonar_ds;
+		chip->model.shortname = "Xonar DS";
+		break;
+	case 0x8522:
+		chip->model = model_xonar_ds;
+		chip->model.shortname = "Xonar DSX";
 		break;
 	case 0x835e:
 		chip->model = model_xonar_hdav_slim;

@@ -4,7 +4,7 @@
  * This code is based on:
  * Author: Vitaly Wool <vital@embeddedalley.com>
  *
- * Copyright 2008-2009 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2008-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  * Copyright 2008 Embedded Alley Solutions, Inc All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or
@@ -39,12 +39,18 @@
  * the required value in the imx_fb_videomode structure.
  */
 
+#include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
-#include <mach/mxsfb.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/fb.h>
+#include <linux/regulator/consumer.h>
+#include <video/of_display_timing.h>
+#include <video/videomode.h>
 
 #define REG_SET	4
 #define REG_CLR	8
@@ -90,9 +96,10 @@
 #define CTRL_DF24			(1 << 1)
 #define CTRL_RUN			(1 << 0)
 
-#define CTRL1_FIFO_CLEAR		(1 << 21)
-#define CTRL1_SET_BYTE_PACKAGING(x)	(((x) & 0xf) << 16)
-#define CTRL1_GET_BYTE_PACKAGING(x)	(((x) >> 16) & 0xf)
+#define CTRL1_RECOVERY_ON_UNDERFLOW		(1 << 24)
+#define CTRL1_FIFO_CLEAR				(1 << 21)
+#define CTRL1_SET_BYTE_PACKAGING(x)		(((x) & 0xf) << 16)
+#define CTRL1_GET_BYTE_PACKAGING(x)		(((x) >> 16) & 0xf)
 
 #define TRANSFER_COUNT_SET_VCOUNT(x)	(((x) & 0xffff) << 16)
 #define TRANSFER_COUNT_GET_VCOUNT(x)	(((x) >> 16) & 0xffff)
@@ -103,7 +110,7 @@
 #define VDCTRL0_ENABLE_PRESENT		(1 << 28)
 #define VDCTRL0_VSYNC_ACT_HIGH		(1 << 27)
 #define VDCTRL0_HSYNC_ACT_HIGH		(1 << 26)
-#define VDCTRL0_DOTCLK_ACT_FAILING	(1 << 25)
+#define VDCTRL0_DOTCLK_ACT_FALLING	(1 << 25)
 #define VDCTRL0_ENABLE_ACT_HIGH		(1 << 24)
 #define VDCTRL0_VSYNC_PERIOD_UNIT	(1 << 21)
 #define VDCTRL0_VSYNC_PULSE_WIDTH_UNIT	(1 << 20)
@@ -138,6 +145,14 @@
 #define BLUE 2
 #define TRANSP 3
 
+#define STMLCDIF_8BIT  1 /** pixel data bus to the display is of 8 bit width */
+#define STMLCDIF_16BIT 0 /** pixel data bus to the display is of 16 bit width */
+#define STMLCDIF_18BIT 2 /** pixel data bus to the display is of 18 bit width */
+#define STMLCDIF_24BIT 3 /** pixel data bus to the display is of 24 bit width */
+
+#define FB_SYNC_OE_LOW_ACT		0x80000000
+#define FB_SYNC_CLK_LAT_FALL	0x40000000
+
 enum mxsfb_devtype {
 	MXSFB_V3,
 	MXSFB_V4,
@@ -157,14 +172,16 @@ struct mxsfb_devdata {
 struct mxsfb_info {
 	struct fb_info fb_info;
 	struct platform_device *pdev;
-	struct clk *clk;
+	struct clk *clk_pix;
+	struct clk *clk_axi;
+	bool clk_axi_enabled;
 	void __iomem *base;	/* registers */
 	unsigned allocated_size;
 	int enabled;
 	unsigned ld_intf_width;
 	unsigned dotclk_delay;
 	const struct mxsfb_devdata *devdata;
-	int mapped;
+	struct regulator *reg_lcd;
 };
 
 #define mxsfb_is_v3(host) (host->devdata->ipversion == 3)
@@ -192,6 +209,29 @@ static const struct mxsfb_devdata mxsfb_devdata[] = {
 };
 
 #define to_imxfb_host(x) (container_of(x, struct mxsfb_info, fb_info))
+
+static int mxsfb_map_videomem(struct fb_info *info);
+static int mxsfb_unmap_videomem(struct fb_info *info);
+
+/* enable lcdif axi clock */
+static inline void clk_enable_axi(struct mxsfb_info *host)
+{
+	if (!host->clk_axi_enabled && host &&
+		host->clk_axi && !IS_ERR(host->clk_axi)) {
+		clk_prepare_enable(host->clk_axi);
+		host->clk_axi_enabled = true;
+	}
+}
+
+/* disable lcdif axi clock */
+static inline void clk_disable_axi(struct mxsfb_info *host)
+{
+	if (host->clk_axi_enabled && host &&
+		host->clk_axi && !IS_ERR(host->clk_axi)) {
+		clk_disable_unprepare(host->clk_axi);
+		host->clk_axi_enabled = false;
+	}
+}
 
 /* mask and shift depends on architecture */
 static inline u32 set_hsync_pulse_width(struct mxsfb_info *host, unsigned val)
@@ -278,9 +318,10 @@ static int mxsfb_check_var(struct fb_var_screeninfo *var,
 	if (var->yres < MIN_YRES)
 		var->yres = MIN_YRES;
 
-	var->xres_virtual = var->xres;
-
-	var->yres_virtual = var->yres;
+	if (var->xres_virtual < var->xres)
+		var->xres_virtual = var->xres;
+	if (var->yres_virtual < var->yres)
+		var->yres_virtual = var->yres;
 
 	switch (var->bits_per_pixel) {
 	case 16:
@@ -324,11 +365,23 @@ static void mxsfb_enable_controller(struct fb_info *fb_info)
 {
 	struct mxsfb_info *host = to_imxfb_host(fb_info);
 	u32 reg;
+	int ret;
 
 	dev_dbg(&host->pdev->dev, "%s\n", __func__);
 
-	clk_enable(host->clk);
-	clk_set_rate(host->clk, PICOS2KHZ(fb_info->var.pixclock) * 1000U);
+	if (host->reg_lcd) {
+		ret = regulator_enable(host->reg_lcd);
+		if (ret) {
+			dev_err(&host->pdev->dev,
+				"lcd regulator enable failed:	%d\n", ret);
+			return;
+		}
+	}
+
+	clk_enable_axi(host);
+
+	clk_prepare_enable(host->clk_pix);
+	clk_set_rate(host->clk_pix, PICOS2KHZ(fb_info->var.pixclock) * 1000U);
 
 	/* if it was disabled, re-enable the mode again */
 	writel(CTRL_DOTCLK_MODE, host->base + LCDC_CTRL + REG_SET);
@@ -340,6 +393,9 @@ static void mxsfb_enable_controller(struct fb_info *fb_info)
 
 	writel(CTRL_RUN, host->base + LCDC_CTRL + REG_SET);
 
+	/* Recovery on underflow */
+	writel(CTRL1_RECOVERY_ON_UNDERFLOW, host->base + LCDC_CTRL1 + REG_SET);
+
 	host->enabled = 1;
 }
 
@@ -348,9 +404,11 @@ static void mxsfb_disable_controller(struct fb_info *fb_info)
 	struct mxsfb_info *host = to_imxfb_host(fb_info);
 	unsigned loop;
 	u32 reg;
+	int ret;
 
 	dev_dbg(&host->pdev->dev, "%s\n", __func__);
 
+	clk_enable_axi(host);
 	/*
 	 * Even if we disable the controller here, it will still continue
 	 * until its FIFOs are running out of data
@@ -365,11 +423,19 @@ static void mxsfb_disable_controller(struct fb_info *fb_info)
 		loop--;
 	}
 
-	writel(VDCTRL4_SYNC_SIGNALS_ON, host->base + LCDC_VDCTRL4 + REG_CLR);
+	reg = readl(host->base + LCDC_VDCTRL4);
+	writel(reg & ~VDCTRL4_SYNC_SIGNALS_ON, host->base + LCDC_VDCTRL4);
 
-	clk_disable(host->clk);
+	clk_disable_unprepare(host->clk_pix);
 
 	host->enabled = 0;
+
+	if (host->reg_lcd) {
+		ret = regulator_disable(host->reg_lcd);
+		if (ret)
+			dev_err(&host->pdev->dev,
+				"lcd regulator disable failed: %d\n", ret);
+	}
 }
 
 static int mxsfb_set_par(struct fb_info *fb_info)
@@ -379,13 +445,7 @@ static int mxsfb_set_par(struct fb_info *fb_info)
 	int line_size, fb_size;
 	int reenable = 0;
 
-	line_size =  fb_info->var.xres * (fb_info->var.bits_per_pixel >> 3);
-	fb_size = fb_info->var.yres_virtual * line_size;
-
-	if (fb_size > fb_info->fix.smem_len)
-		return -ENOMEM;
-
-	fb_info->fix.line_length = line_size;
+	clk_enable_axi(host);
 
 	/*
 	 * It seems, you can't re-program the controller if it is still running.
@@ -399,6 +459,19 @@ static int mxsfb_set_par(struct fb_info *fb_info)
 
 	/* clear the FIFOs */
 	writel(CTRL1_FIFO_CLEAR, host->base + LCDC_CTRL1 + REG_SET);
+
+	line_size =  fb_info->var.xres * (fb_info->var.bits_per_pixel >> 3);
+	fb_info->fix.line_length = line_size;
+	fb_size = fb_info->var.yres_virtual * line_size;
+
+	/* Reallocate memory */
+	if (!fb_info->fix.smem_start || (fb_size > fb_info->fix.smem_len)) {
+		if (fb_info->fix.smem_start)
+			mxsfb_unmap_videomem(fb_info);
+
+		if (mxsfb_map_videomem(fb_info) < 0)
+			return -ENOMEM;
+	}
 
 	ctrl = CTRL_BYPASS_COUNT | CTRL_MASTER |
 		CTRL_SET_BUS_WIDTH(host->ld_intf_width);
@@ -451,10 +524,10 @@ static int mxsfb_set_par(struct fb_info *fb_info)
 		vdctrl0 |= VDCTRL0_HSYNC_ACT_HIGH;
 	if (fb_info->var.sync & FB_SYNC_VERT_HIGH_ACT)
 		vdctrl0 |= VDCTRL0_VSYNC_ACT_HIGH;
-	if (fb_info->var.sync & FB_SYNC_DATA_ENABLE_HIGH_ACT)
+	if (!(fb_info->var.sync & FB_SYNC_OE_LOW_ACT))
 		vdctrl0 |= VDCTRL0_ENABLE_ACT_HIGH;
-	if (fb_info->var.sync & FB_SYNC_DOTCLK_FAILING_ACT)
-		vdctrl0 |= VDCTRL0_DOTCLK_ACT_FAILING;
+	if (fb_info->var.sync & FB_SYNC_CLK_LAT_FALL)
+		vdctrl0 |= VDCTRL0_DOTCLK_ACT_FALLING;
 
 	writel(vdctrl0, host->base + LCDC_VDCTRL0);
 
@@ -542,6 +615,8 @@ static int mxsfb_blank(int blank, struct fb_info *fb_info)
 	case FB_BLANK_NORMAL:
 		if (host->enabled)
 			mxsfb_disable_controller(fb_info);
+
+		clk_disable_axi(host);
 		break;
 
 	case FB_BLANK_UNBLANK:
@@ -561,11 +636,41 @@ static int mxsfb_pan_display(struct fb_var_screeninfo *var,
 	if (var->xoffset != 0)
 		return -EINVAL;
 
+	clk_enable_axi(host);
+
 	offset = fb_info->fix.line_length * var->yoffset;
 
 	/* update on next VSYNC */
 	writel(fb_info->fix.smem_start + offset,
 			host->base + host->devdata->next_buf);
+
+	return 0;
+}
+
+static int mxsfb_mmap(struct fb_info *info, struct vm_area_struct *vma)
+{
+	u32 len;
+	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
+
+	if (offset < info->fix.smem_len) {
+		/* mapping framebuffer memory */
+		len = info->fix.smem_len - offset;
+		vma->vm_pgoff = (info->fix.smem_start + offset) >> PAGE_SHIFT;
+	} else
+		return -EINVAL;
+
+	len = PAGE_ALIGN(len);
+	if (vma->vm_end - vma->vm_start > len)
+		return -EINVAL;
+
+	/* make buffers bufferable */
+	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+
+	if (remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
+			    vma->vm_end - vma->vm_start, vma->vm_page_prot)) {
+		dev_dbg(info->device, "mmap remap_pfn_range failed\n");
+		return -ENOBUFS;
+	}
 
 	return 0;
 }
@@ -577,12 +682,13 @@ static struct fb_ops mxsfb_ops = {
 	.fb_setcolreg = mxsfb_setcolreg,
 	.fb_blank = mxsfb_blank,
 	.fb_pan_display = mxsfb_pan_display,
+	.fb_mmap = mxsfb_mmap,
 	.fb_fillrect = cfb_fillrect,
 	.fb_copyarea = cfb_copyarea,
 	.fb_imageblit = cfb_imageblit,
 };
 
-static int __devinit mxsfb_restore_mode(struct mxsfb_info *host)
+static int mxsfb_restore_mode(struct mxsfb_info *host)
 {
 	struct fb_info *fb_info = &host->fb_info;
 	unsigned line_count;
@@ -591,6 +697,8 @@ static int __devinit mxsfb_restore_mode(struct mxsfb_info *host)
 	int bits_per_pixel, ofs;
 	u32 transfer_count, vdctrl0, vdctrl2, vdctrl3, vdctrl4, ctrl;
 	struct fb_videomode vmode;
+
+	clk_enable_axi(host);
 
 	/* Only restore the mode when the controller is running */
 	ctrl = readl(host->base + LCDC_CTRL);
@@ -620,7 +728,7 @@ static int __devinit mxsfb_restore_mode(struct mxsfb_info *host)
 
 	fb_info->var.bits_per_pixel = bits_per_pixel;
 
-	vmode.pixclock = KHZ2PICOS(clk_get_rate(host->clk) / 1000U);
+	vmode.pixclock = KHZ2PICOS(clk_get_rate(host->clk_pix) / 1000U);
 	vmode.hsync_len = get_hsync_pulse_width(host, vdctrl2);
 	vmode.left_margin = GET_HOR_WAIT_CNT(vdctrl3) - vmode.hsync_len;
 	vmode.right_margin = VDCTRL2_GET_HSYNC_PERIOD(vdctrl2) - vmode.hsync_len -
@@ -667,20 +775,109 @@ static int __devinit mxsfb_restore_mode(struct mxsfb_info *host)
 	line_count = fb_info->fix.smem_len / fb_info->fix.line_length;
 	fb_info->fix.ypanstep = 1;
 
-	clk_enable(host->clk);
+	clk_prepare_enable(host->clk_pix);
 	host->enabled = 1;
 
 	return 0;
 }
 
-static int __devinit mxsfb_init_fbinfo(struct mxsfb_info *host)
+static int mxsfb_init_fbinfo_dt(struct mxsfb_info *host)
 {
 	struct fb_info *fb_info = &host->fb_info;
 	struct fb_var_screeninfo *var = &fb_info->var;
-	struct mxsfb_platform_data *pdata = host->pdev->dev.platform_data;
-	dma_addr_t fb_phys;
-	void *fb_virt;
-	unsigned fb_size = pdata->fb_size;
+	struct device *dev = &host->pdev->dev;
+	struct device_node *np = host->pdev->dev.of_node;
+	struct device_node *display_np;
+	struct device_node *timings_np;
+	struct display_timings *timings;
+	u32 width;
+	int i;
+	int ret = 0;
+
+	display_np = of_parse_phandle(np, "display", 0);
+	if (!display_np) {
+		dev_err(dev, "failed to find display phandle\n");
+		return -ENOENT;
+	}
+
+	ret = of_property_read_u32(display_np, "bus-width", &width);
+	if (ret < 0) {
+		dev_err(dev, "failed to get property bus-width\n");
+		goto put_display_node;
+	}
+
+	switch (width) {
+	case 8:
+		host->ld_intf_width = STMLCDIF_8BIT;
+		break;
+	case 16:
+		host->ld_intf_width = STMLCDIF_16BIT;
+		break;
+	case 18:
+		host->ld_intf_width = STMLCDIF_18BIT;
+		break;
+	case 24:
+		host->ld_intf_width = STMLCDIF_24BIT;
+		break;
+	default:
+		dev_err(dev, "invalid bus-width value\n");
+		ret = -EINVAL;
+		goto put_display_node;
+	}
+
+	ret = of_property_read_u32(display_np, "bits-per-pixel",
+				   &var->bits_per_pixel);
+	if (ret < 0) {
+		dev_err(dev, "failed to get property bits-per-pixel\n");
+		goto put_display_node;
+	}
+
+	timings = of_get_display_timings(display_np);
+	if (!timings) {
+		dev_err(dev, "failed to get display timings\n");
+		ret = -ENOENT;
+		goto put_display_node;
+	}
+
+	timings_np = of_find_node_by_name(display_np,
+					  "display-timings");
+	if (!timings_np) {
+		dev_err(dev, "failed to find display-timings node\n");
+		ret = -ENOENT;
+		goto put_display_node;
+	}
+
+	for (i = 0; i < of_get_child_count(timings_np); i++) {
+		struct videomode vm;
+		struct fb_videomode fb_vm;
+
+		ret = videomode_from_timings(timings, &vm, i);
+		if (ret < 0)
+			goto put_timings_node;
+		ret = fb_videomode_from_videomode(&vm, &fb_vm);
+		if (ret < 0)
+			goto put_timings_node;
+
+		if (!(vm.flags & DISPLAY_FLAGS_DE_HIGH))
+			fb_vm.sync |= FB_SYNC_OE_LOW_ACT;
+		if (vm.flags & DISPLAY_FLAGS_PIXDATA_NEGEDGE)
+			fb_vm.sync |= FB_SYNC_CLK_LAT_FALL;
+		fb_add_videomode(&fb_vm, &fb_info->modelist);
+	}
+
+put_timings_node:
+	of_node_put(timings_np);
+put_display_node:
+	of_node_put(display_np);
+	return ret;
+}
+
+static int mxsfb_init_fbinfo(struct mxsfb_info *host)
+{
+	struct fb_info *fb_info = &host->fb_info;
+	struct fb_var_screeninfo *var = &fb_info->var;
+	struct fb_modelist *modelist;
+	int ret;
 
 	fb_info->fbops = &mxsfb_ops;
 	fb_info->flags = FBINFO_FLAG_DEFAULT | FBINFO_READS_FAST;
@@ -690,192 +887,95 @@ static int __devinit mxsfb_init_fbinfo(struct mxsfb_info *host)
 	fb_info->fix.visual = FB_VISUAL_TRUECOLOR,
 	fb_info->fix.accel = FB_ACCEL_NONE;
 
-	var->bits_per_pixel = pdata->default_bpp ? pdata->default_bpp : 16;
+	ret = mxsfb_init_fbinfo_dt(host);
+	if (ret)
+		return ret;
+
+	/* first video mode in the modelist as default video mode  */
+	modelist = list_first_entry(&fb_info->modelist,
+			struct fb_modelist, list);
+	fb_videomode_to_var(var, &modelist->mode);
+
 	var->nonstd = 0;
 	var->activate = FB_ACTIVATE_NOW;
 	var->accel_flags = 0;
 	var->vmode = FB_VMODE_NONINTERLACED;
 
-	host->dotclk_delay = pdata->dotclk_delay;
-	host->ld_intf_width = pdata->ld_intf_width;
+	/* init the color fields */
+	mxsfb_check_var(var, fb_info);
+
+	fb_info->fix.line_length =
+		fb_info->var.xres * (fb_info->var.bits_per_pixel >> 3);
 
 	/* Memory allocation for framebuffer */
-	if (pdata->fb_phys) {
-		if (!fb_size)
-			return -EINVAL;
-
-		fb_phys = pdata->fb_phys;
-
-		if (!request_mem_region(fb_phys, fb_size, host->pdev->name))
-			return -ENOMEM;
-
-		fb_virt = ioremap(fb_phys, fb_size);
-		if (!fb_virt) {
-			release_mem_region(fb_phys, fb_size);
-			return -ENOMEM;
-		}
-		host->mapped = 1;
-	} else {
-		if (!fb_size)
-			fb_size = SZ_2M; /* default */
-		fb_virt = alloc_pages_exact(fb_size, GFP_DMA);
-		if (!fb_virt)
-			return -ENOMEM;
-
-		fb_phys = virt_to_phys(fb_virt);
-	}
-
-	fb_info->fix.smem_start = fb_phys;
-	fb_info->screen_base = fb_virt;
-	fb_info->screen_size = fb_info->fix.smem_len = fb_size;
+	if (mxsfb_map_videomem(fb_info) < 0)
+		return -ENOMEM;
 
 	if (mxsfb_restore_mode(host))
-		memset(fb_virt, 0, fb_size);
+		memset((char *)fb_info->screen_base, 0, fb_info->fix.smem_len);
 
 	return 0;
 }
 
-static void __devexit mxsfb_free_videomem(struct mxsfb_info *host)
+static void mxsfb_free_videomem(struct mxsfb_info *host)
 {
 	struct fb_info *fb_info = &host->fb_info;
 
-	if (host->mapped) {
-		iounmap(fb_info->screen_base);
-		release_mem_region(fb_info->fix.smem_start,
-				fb_info->screen_size);
-	} else {
-		free_pages_exact(fb_info->screen_base, fb_info->fix.smem_len);
-	}
+	mxsfb_unmap_videomem(fb_info);
 }
 
-static int __devinit mxsfb_probe(struct platform_device *pdev)
+/*!
+ * Allocates the DRAM memory for the frame buffer.      This buffer is remapped
+ * into a non-cached, non-buffered, memory region to allow palette and pixel
+ * writes to occur without flushing the cache.  Once this area is remapped,
+ * all virtual memory access to the video memory should occur at the new region.
+ *
+ * @param       fbi     framebuffer information pointer
+ *
+ * @return      Error code indicating success or failure
+ */
+static int mxsfb_map_videomem(struct fb_info *fbi)
 {
-	struct mxsfb_platform_data *pdata = pdev->dev.platform_data;
-	struct resource *res;
-	struct mxsfb_info *host;
-	struct fb_info *fb_info;
-	struct fb_modelist *modelist;
-	int i, ret;
+	if (fbi->fix.smem_len < fbi->var.yres_virtual * fbi->fix.line_length)
+		fbi->fix.smem_len = fbi->var.yres_virtual *
+				    fbi->fix.line_length;
 
-	if (!pdata) {
-		dev_err(&pdev->dev, "No platformdata. Giving up\n");
-		return -ENODEV;
-	}
-
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(&pdev->dev, "Cannot get memory IO resource\n");
-		return -ENODEV;
-	}
-
-	if (!request_mem_region(res->start, resource_size(res), pdev->name))
+	fbi->screen_base = dma_alloc_writecombine(fbi->device,
+				fbi->fix.smem_len,
+				(dma_addr_t *)&fbi->fix.smem_start,
+				GFP_DMA | GFP_KERNEL);
+	if (fbi->screen_base == 0) {
+		dev_err(fbi->device, "Unable to allocate framebuffer memory\n");
+		fbi->fix.smem_len = 0;
+		fbi->fix.smem_start = 0;
 		return -EBUSY;
-
-	fb_info = framebuffer_alloc(sizeof(struct mxsfb_info), &pdev->dev);
-	if (!fb_info) {
-		dev_err(&pdev->dev, "Failed to allocate fbdev\n");
-		ret = -ENOMEM;
-		goto error_alloc_info;
 	}
 
-	host = to_imxfb_host(fb_info);
+	dev_dbg(fbi->device, "allocated fb @ paddr=0x%08X, size=%d.\n",
+		(uint32_t) fbi->fix.smem_start, fbi->fix.smem_len);
 
-	host->base = ioremap(res->start, resource_size(res));
-	if (!host->base) {
-		dev_err(&pdev->dev, "ioremap failed\n");
-		ret = -ENOMEM;
-		goto error_ioremap;
-	}
+	fbi->screen_size = fbi->fix.smem_len;
 
-	host->pdev = pdev;
-	platform_set_drvdata(pdev, host);
-
-	host->devdata = &mxsfb_devdata[pdev->id_entry->driver_data];
-
-	host->clk = clk_get(&host->pdev->dev, NULL);
-	if (IS_ERR(host->clk)) {
-		ret = PTR_ERR(host->clk);
-		goto error_getclock;
-	}
-
-	fb_info->pseudo_palette = kmalloc(sizeof(u32) * 16, GFP_KERNEL);
-	if (!fb_info->pseudo_palette) {
-		ret = -ENOMEM;
-		goto error_pseudo_pallette;
-	}
-
-	INIT_LIST_HEAD(&fb_info->modelist);
-
-	ret = mxsfb_init_fbinfo(host);
-	if (ret != 0)
-		goto error_init_fb;
-
-	for (i = 0; i < pdata->mode_count; i++)
-		fb_add_videomode(&pdata->mode_list[i], &fb_info->modelist);
-
-	modelist = list_first_entry(&fb_info->modelist,
-			struct fb_modelist, list);
-	fb_videomode_to_var(&fb_info->var, &modelist->mode);
-
-	/* init the color fields */
-	mxsfb_check_var(&fb_info->var, fb_info);
-
-	platform_set_drvdata(pdev, fb_info);
-
-	ret = register_framebuffer(fb_info);
-	if (ret != 0) {
-		dev_err(&pdev->dev,"Failed to register framebuffer\n");
-		goto error_register;
-	}
-
-	if (!host->enabled) {
-		writel(0, host->base + LCDC_CTRL);
-		mxsfb_set_par(fb_info);
-		mxsfb_enable_controller(fb_info);
-	}
-
-	dev_info(&pdev->dev, "initialized\n");
+	/* Clear the screen */
+	memset((char *)fbi->screen_base, 0, fbi->fix.smem_len);
 
 	return 0;
-
-error_register:
-	if (host->enabled)
-		clk_disable(host->clk);
-	fb_destroy_modelist(&fb_info->modelist);
-error_init_fb:
-	kfree(fb_info->pseudo_palette);
-error_pseudo_pallette:
-	clk_put(host->clk);
-error_getclock:
-	iounmap(host->base);
-error_ioremap:
-	framebuffer_release(fb_info);
-error_alloc_info:
-	release_mem_region(res->start, resource_size(res));
-
-	return ret;
 }
 
-static int __devexit mxsfb_remove(struct platform_device *pdev)
+/*!
+ * De-allocates the DRAM memory for the frame buffer.
+ *
+ * @param       fbi     framebuffer information pointer
+ *
+ * @return      Error code indicating success or failure
+ */
+static int mxsfb_unmap_videomem(struct fb_info *fbi)
 {
-	struct fb_info *fb_info = platform_get_drvdata(pdev);
-	struct mxsfb_info *host = to_imxfb_host(fb_info);
-	struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-
-	if (host->enabled)
-		mxsfb_disable_controller(fb_info);
-
-	unregister_framebuffer(fb_info);
-	kfree(fb_info->pseudo_palette);
-	mxsfb_free_videomem(host);
-	iounmap(host->base);
-	clk_put(host->clk);
-
-	framebuffer_release(fb_info);
-	release_mem_region(res->start, resource_size(res));
-
-	platform_set_drvdata(pdev, NULL);
-
+	dma_free_writecombine(fbi->device, fbi->fix.smem_len,
+			      fbi->screen_base, fbi->fix.smem_start);
+	fbi->screen_base = 0;
+	fbi->fix.smem_start = 0;
+	fbi->fix.smem_len = 0;
 	return 0;
 }
 
@@ -892,27 +992,159 @@ static struct platform_device_id mxsfb_devtype[] = {
 };
 MODULE_DEVICE_TABLE(platform, mxsfb_devtype);
 
+static const struct of_device_id mxsfb_dt_ids[] = {
+	{ .compatible = "fsl,imx23-lcdif", .data = &mxsfb_devtype[0], },
+	{ .compatible = "fsl,imx28-lcdif", .data = &mxsfb_devtype[1], },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, mxsfb_dt_ids);
+
+static int mxsfb_probe(struct platform_device *pdev)
+{
+	const struct of_device_id *of_id =
+			of_match_device(mxsfb_dt_ids, &pdev->dev);
+	struct resource *res;
+	struct mxsfb_info *host;
+	struct fb_info *fb_info;
+	struct pinctrl *pinctrl;
+	int ret;
+
+	if (of_id)
+		pdev->id_entry = of_id->data;
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res) {
+		dev_err(&pdev->dev, "Cannot get memory IO resource\n");
+		return -ENODEV;
+	}
+
+	fb_info = framebuffer_alloc(sizeof(struct mxsfb_info), &pdev->dev);
+	if (!fb_info) {
+		dev_err(&pdev->dev, "Failed to allocate fbdev\n");
+		return -ENOMEM;
+	}
+
+	host = to_imxfb_host(fb_info);
+
+	host->base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(host->base)) {
+		dev_err(&pdev->dev, "ioremap failed\n");
+		ret = PTR_ERR(host->base);
+		goto fb_release;
+	}
+
+	host->pdev = pdev;
+	platform_set_drvdata(pdev, host);
+
+	host->devdata = &mxsfb_devdata[pdev->id_entry->driver_data];
+
+	pinctrl = devm_pinctrl_get_select_default(&pdev->dev);
+	if (IS_ERR(pinctrl)) {
+		ret = PTR_ERR(pinctrl);
+		goto fb_release;
+	}
+
+	host->clk_pix = devm_clk_get(&host->pdev->dev, "pix");
+	if (IS_ERR(host->clk_pix)) {
+		ret = PTR_ERR(host->clk_pix);
+		goto fb_release;
+	}
+
+	host->clk_axi = devm_clk_get(&host->pdev->dev, "axi");
+	if (IS_ERR(host->clk_axi)) {
+		ret = PTR_ERR(host->clk_axi);
+		goto fb_release;
+	}
+
+	host->reg_lcd = devm_regulator_get(&pdev->dev, "lcd");
+	if (IS_ERR(host->reg_lcd))
+		host->reg_lcd = NULL;
+
+	fb_info->pseudo_palette = devm_kzalloc(&pdev->dev, sizeof(u32) * 16,
+					       GFP_KERNEL);
+	if (!fb_info->pseudo_palette) {
+		ret = -ENOMEM;
+		goto fb_release;
+	}
+
+	INIT_LIST_HEAD(&fb_info->modelist);
+
+	ret = mxsfb_init_fbinfo(host);
+	if (ret != 0)
+		goto fb_release;
+
+	platform_set_drvdata(pdev, fb_info);
+
+	ret = register_framebuffer(fb_info);
+	if (ret != 0) {
+		dev_err(&pdev->dev,"Failed to register framebuffer\n");
+		goto fb_destroy;
+	}
+
+	if (!host->enabled) {
+		writel(0, host->base + LCDC_CTRL);
+		mxsfb_set_par(fb_info);
+		mxsfb_enable_controller(fb_info);
+	}
+
+	dev_info(&pdev->dev, "initialized\n");
+
+	return 0;
+
+fb_destroy:
+	if (host->enabled)
+		clk_disable_unprepare(host->clk_pix);
+	fb_destroy_modelist(&fb_info->modelist);
+fb_release:
+	framebuffer_release(fb_info);
+
+	return ret;
+}
+
+static int mxsfb_remove(struct platform_device *pdev)
+{
+	struct fb_info *fb_info = platform_get_drvdata(pdev);
+	struct mxsfb_info *host = to_imxfb_host(fb_info);
+
+	if (host->enabled)
+		mxsfb_disable_controller(fb_info);
+
+	unregister_framebuffer(fb_info);
+	mxsfb_free_videomem(host);
+
+	framebuffer_release(fb_info);
+
+	platform_set_drvdata(pdev, NULL);
+
+	return 0;
+}
+
+static void mxsfb_shutdown(struct platform_device *pdev)
+{
+	struct fb_info *fb_info = platform_get_drvdata(pdev);
+	struct mxsfb_info *host = to_imxfb_host(fb_info);
+
+	clk_enable_axi(host);
+	/*
+	 * Force stop the LCD controller as keeping it running during reboot
+	 * might interfere with the BootROM's boot mode pads sampling.
+	 */
+	writel(CTRL_RUN, host->base + LCDC_CTRL + REG_CLR);
+	clk_disable_axi(host);
+}
+
 static struct platform_driver mxsfb_driver = {
 	.probe = mxsfb_probe,
-	.remove = __devexit_p(mxsfb_remove),
+	.remove = mxsfb_remove,
+	.shutdown = mxsfb_shutdown,
 	.id_table = mxsfb_devtype,
 	.driver = {
 		   .name = DRIVER_NAME,
+		   .of_match_table = mxsfb_dt_ids,
 	},
 };
 
-static int __init mxsfb_init(void)
-{
-	return platform_driver_register(&mxsfb_driver);
-}
-
-static void __exit mxsfb_exit(void)
-{
-	platform_driver_unregister(&mxsfb_driver);
-}
-
-module_init(mxsfb_init);
-module_exit(mxsfb_exit);
+module_platform_driver(mxsfb_driver);
 
 MODULE_DESCRIPTION("Freescale mxs framebuffer driver");
 MODULE_AUTHOR("Sascha Hauer, Pengutronix");

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,6 +18,8 @@
 
 #ifndef __MIPI_DSI_H__
 #define __MIPI_DSI_H__
+
+#include <linux/regmap.h>
 
 #ifdef DEBUG
 #define mipi_dbg(fmt, ...) printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
@@ -59,32 +61,33 @@ struct mipi_dsi_match_lcd {
 	struct mipi_dsi_lcd_callback lcd_callback;
 };
 
+struct mipi_dsi_bus_mux {
+	int reg;
+	int mask;
+	int (*get_mux) (int dev_id, int disp_id);
+};
+
 /* driver private data */
 struct mipi_dsi_info {
 	struct platform_device		*pdev;
 	void __iomem			*mmio_base;
+	struct regmap			*regmap;
+	const struct mipi_dsi_bus_mux	*bus_mux;
 	int				dsi_power_on;
 	int				lcd_inited;
 	u32				dphy_pll_config;
-	int				ipu_id;
+	int				dev_id;
 	int				disp_id;
 	char				*lcd_panel;
 	int				irq;
 	struct clk			*dphy_clk;
+	struct clk			*cfg_clk;
 	struct mxc_dispdrv_handle	*disp_mipi;
 	struct  fb_videomode		*mode;
+	struct regulator		*disp_power_on;
 	struct  mipi_lcd_config		*lcd_config;
 	/* board related power control */
 	struct backlight_device		*bl;
-	struct regulator		*io_regulator;
-	struct regulator		*core_regulator;
-	struct regulator		*analog_regulator;
-	int				io_volt;
-	int				core_volt;
-	int				analog_volt;
-	void (*reset) (void);
-	void (*lcd_power)(int);
-	void (*backlight_power)(int);
 	/* callback for lcd panel operation */
 	struct mipi_dsi_lcd_callback	*lcd_callback;
 };

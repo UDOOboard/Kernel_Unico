@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2010-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,11 +26,10 @@
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/sched.h>
+#include <linux/module.h>
 #include <linux/pxp_dma.h>
-
 #include <linux/atomic.h>
-
-#include <mach/dma.h>
+#include <linux/platform_data/dma-imx.h>
 
 static atomic_t open_count = ATOMIC_INIT(0);
 
@@ -151,7 +150,8 @@ static int pxp_ioc_config_chan(unsigned long arg)
 	    info->dma_chan->device->device_prep_slave_sg(info->dma_chan,
 							 sg, 3,
 							 DMA_TO_DEVICE,
-							 DMA_PREP_INTERRUPT);
+							 DMA_PREP_INTERRUPT,
+							 NULL);
 	if (!txd) {
 		pr_err("Error preparing a DMA transaction descriptor.\n");
 		return -EIO;
@@ -234,7 +234,6 @@ static int pxp_device_mmap(struct file *file, struct vm_area_struct *vma)
 	if (found == 0)
 		return -ENOMEM;
 
-	vma->vm_flags |= VM_IO | VM_RESERVED;
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
 	return remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
@@ -270,7 +269,8 @@ static long pxp_device_ioctl(struct file *filp,
 			dma_cap_zero(mask);
 			dma_cap_set(DMA_SLAVE, mask);
 			dma_cap_set(DMA_PRIVATE, mask);
-			info->dma_chan = dma_request_channel(mask, chan_filter, NULL);
+			info->dma_chan =
+				dma_request_channel(mask, chan_filter, NULL);
 			if (!info->dma_chan) {
 				pr_err("Unsccessfully received channel!\n");
 				kfree(info);
@@ -473,7 +473,7 @@ static struct miscdevice pxp_device_miscdev = {
 	.fops = &pxp_device_fops,
 };
 
-static int __devinit pxp_device_probe(struct platform_device *pdev)
+int register_pxp_device(void)
 {
 	int ret;
 
@@ -481,39 +481,11 @@ static int __devinit pxp_device_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	pr_debug("PxP_Device Probe Successfully\n");
+	pr_debug("PxP_Device registered Successfully\n");
 	return 0;
 }
 
-static int __devexit pxp_device_remove(struct platform_device *pdev)
+void unregister_pxp_device(void)
 {
 	misc_deregister(&pxp_device_miscdev);
-
-	return 0;
 }
-
-static struct platform_driver pxp_client_driver = {
-	.probe = pxp_device_probe,
-	.remove = __exit_p(pxp_device_remove),
-	.driver = {
-		   .name = "imx-pxp-client",
-		   .owner = THIS_MODULE,
-		   },
-};
-
-static int __init pxp_device_init(void)
-{
-	return platform_driver_register(&pxp_client_driver);
-}
-
-static void __exit pxp_device_exit(void)
-{
-	platform_driver_unregister(&pxp_client_driver);
-}
-
-module_init(pxp_device_init);
-module_exit(pxp_device_exit);
-
-MODULE_DESCRIPTION("i.MX PxP client driver");
-MODULE_AUTHOR("Freescale Semiconductor, Inc.");
-MODULE_LICENSE("GPL");

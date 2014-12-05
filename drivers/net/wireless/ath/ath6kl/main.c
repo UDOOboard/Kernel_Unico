@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004-2011 Atheros Communications Inc.
+ * Copyright (c) 2011-2012 Qualcomm Atheros, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,18 +15,21 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include "core.h"
 #include "hif-ops.h"
 #include "cfg80211.h"
 #include "target.h"
 #include "debug.h"
 
-struct ath6kl_sta *ath6kl_find_sta(struct ath6kl *ar, u8 *node_addr)
+struct ath6kl_sta *ath6kl_find_sta(struct ath6kl_vif *vif, u8 *node_addr)
 {
+	struct ath6kl *ar = vif->ar;
 	struct ath6kl_sta *conn = NULL;
 	u8 i, max_conn;
 
-	max_conn = (ar->nw_type == AP_NETWORK) ? AP_MAX_NUM_STA : 0;
+	max_conn = (vif->nw_type == AP_NETWORK) ? AP_MAX_NUM_STA : 0;
 
 	for (i = 0; i < max_conn; i++) {
 		if (memcmp(node_addr, ar->sta_list[i].mac, ETH_ALEN) == 0) {
@@ -51,9 +55,11 @@ struct ath6kl_sta *ath6kl_find_sta_by_aid(struct ath6kl *ar, u8 aid)
 	return conn;
 }
 
-static void ath6kl_add_new_sta(struct ath6kl *ar, u8 *mac, u16 aid, u8 *wpaie,
-			u8 ielen, u8 keymgmt, u8 ucipher, u8 auth)
+static void ath6kl_add_new_sta(struct ath6kl_vif *vif, u8 *mac, u16 aid,
+			       u8 *wpaie, size_t ielen, u8 keymgmt,
+			       u8 ucipher, u8 auth, u8 apsd_info)
 {
+	struct ath6kl *ar = vif->ar;
 	struct ath6kl_sta *sta;
 	u8 free_slot;
 
@@ -61,23 +67,37 @@ static void ath6kl_add_new_sta(struct ath6kl *ar, u8 *mac, u16 aid, u8 *wpaie,
 
 	sta = &ar->sta_list[free_slot];
 	memcpy(sta->mac, mac, ETH_ALEN);
-	memcpy(sta->wpa_ie, wpaie, ielen);
+	if (ielen <= ATH6KL_MAX_IE)
+		memcpy(sta->wpa_ie, wpaie, ielen);
 	sta->aid = aid;
 	sta->keymgmt = keymgmt;
 	sta->ucipher = ucipher;
 	sta->auth = auth;
+	sta->apsd_info = apsd_info;
 
 	ar->sta_list_index = ar->sta_list_index | (1 << free_slot);
 	ar->ap_stats.sta[free_slot].aid = cpu_to_le32(aid);
+	aggr_conn_init(vif, vif->aggr_cntxt, sta->aggr_conn);
 }
 
 static void ath6kl_sta_cleanup(struct ath6kl *ar, u8 i)
 {
 	struct ath6kl_sta *sta = &ar->sta_list[i];
+	struct ath6kl_mgmt_buff *entry, *tmp;
 
 	/* empty the queued pkts in the PS queue if any */
 	spin_lock_bh(&sta->psq_lock);
 	skb_queue_purge(&sta->psq);
+	skb_queue_purge(&sta->apsdq);
+
+	if (sta->mgmt_psq_len != 0) {
+		list_for_each_entry_safe(entry, tmp, &sta->mgmt_psq, list) {
+			kfree(entry);
+		}
+		INIT_LIST_HEAD(&sta->mgmt_psq);
+		sta->mgmt_psq_len = 0;
+	}
+
 	spin_unlock_bh(&sta->psq_lock);
 
 	memset(&ar->ap_stats.sta[sta->aid - 1], 0,
@@ -88,7 +108,7 @@ static void ath6kl_sta_cleanup(struct ath6kl *ar, u8 i)
 	sta->sta_flags = 0;
 
 	ar->sta_list_index = ar->sta_list_index & ~(1 << i);
-
+	aggr_reset_state(sta->aggr_conn);
 }
 
 static u8 ath6kl_remove_sta(struct ath6kl *ar, u8 *mac, u16 reason)
@@ -173,726 +193,491 @@ void ath6kl_free_cookie(struct ath6kl *ar, struct ath6kl_cookie *cookie)
 	ar->cookie_count++;
 }
 
-/* set the window address register (using 4-byte register access ). */
-static int ath6kl_set_addrwin_reg(struct ath6kl *ar, u32 reg_addr, u32 addr)
+/*
+ * Read from the hardware through its diagnostic window. No cooperation
+ * from the firmware is required for this.
+ */
+int ath6kl_diag_read32(struct ath6kl *ar, u32 address, u32 *value)
 {
-	int status;
-	u8 addr_val[4];
-	s32 i;
+	int ret;
 
-	/*
-	 * Write bytes 1,2,3 of the register to set the upper address bytes,
-	 * the LSB is written last to initiate the access cycle
-	 */
-
-	for (i = 1; i <= 3; i++) {
-		/*
-		 * Fill the buffer with the address byte value we want to
-		 * hit 4 times.
-		 */
-		memset(addr_val, ((u8 *)&addr)[i], 4);
-
-		/*
-		 * Hit each byte of the register address with a 4-byte
-		 * write operation to the same address, this is a harmless
-		 * operation.
-		 */
-		status = hif_read_write_sync(ar, reg_addr + i, addr_val,
-					     4, HIF_WR_SYNC_BYTE_FIX);
-		if (status)
-			break;
-	}
-
-	if (status) {
-		ath6kl_err("failed to write initial bytes of 0x%x to window reg: 0x%X\n",
-			   addr, reg_addr);
-		return status;
-	}
-
-	/*
-	 * Write the address register again, this time write the whole
-	 * 4-byte value. The effect here is that the LSB write causes the
-	 * cycle to start, the extra 3 byte write to bytes 1,2,3 has no
-	 * effect since we are writing the same values again
-	 */
-	status = hif_read_write_sync(ar, reg_addr, (u8 *)(&addr),
-				     4, HIF_WR_SYNC_BYTE_INC);
-
-	if (status) {
-		ath6kl_err("failed to write 0x%x to window reg: 0x%X\n",
-			   addr, reg_addr);
-		return status;
+	ret = ath6kl_hif_diag_read32(ar, address, value);
+	if (ret) {
+		ath6kl_warn("failed to read32 through diagnose window: %d\n",
+			    ret);
+		return ret;
 	}
 
 	return 0;
 }
 
 /*
- * Read from the ATH6KL through its diagnostic window. No cooperation from
- * the Target is required for this.
- */
-int ath6kl_read_reg_diag(struct ath6kl *ar, u32 *address, u32 *data)
-{
-	int status;
-
-	/* set window register to start read cycle */
-	status = ath6kl_set_addrwin_reg(ar, WINDOW_READ_ADDR_ADDRESS,
-					*address);
-
-	if (status)
-		return status;
-
-	/* read the data */
-	status = hif_read_write_sync(ar, WINDOW_DATA_ADDRESS, (u8 *)data,
-				     sizeof(u32), HIF_RD_SYNC_BYTE_INC);
-	if (status) {
-		ath6kl_err("failed to read from window data addr\n");
-		return status;
-	}
-
-	return status;
-}
-
-
-/*
  * Write to the ATH6KL through its diagnostic window. No cooperation from
  * the Target is required for this.
  */
-static int ath6kl_write_reg_diag(struct ath6kl *ar, u32 *address, u32 *data)
+int ath6kl_diag_write32(struct ath6kl *ar, u32 address, __le32 value)
 {
-	int status;
+	int ret;
 
-	/* set write data */
-	status = hif_read_write_sync(ar, WINDOW_DATA_ADDRESS, (u8 *)data,
-				     sizeof(u32), HIF_WR_SYNC_BYTE_INC);
-	if (status) {
-		ath6kl_err("failed to write 0x%x to window data addr\n", *data);
-		return status;
+	ret = ath6kl_hif_diag_write32(ar, address, value);
+
+	if (ret) {
+		ath6kl_err("failed to write 0x%x during diagnose window to 0x%d\n",
+			   address, value);
+		return ret;
 	}
 
-	/* set window register, which starts the write cycle */
-	return ath6kl_set_addrwin_reg(ar, WINDOW_WRITE_ADDR_ADDRESS,
-				      *address);
+	return 0;
 }
 
-int ath6kl_access_datadiag(struct ath6kl *ar, u32 address,
-			   u8 *data, u32 length, bool read)
+int ath6kl_diag_read(struct ath6kl *ar, u32 address, void *data, u32 length)
+{
+	u32 count, *buf = data;
+	int ret;
+
+	if (WARN_ON(length % 4))
+		return -EINVAL;
+
+	for (count = 0; count < length / 4; count++, address += 4) {
+		ret = ath6kl_diag_read32(ar, address, &buf[count]);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+int ath6kl_diag_write(struct ath6kl *ar, u32 address, void *data, u32 length)
 {
 	u32 count;
-	int status = 0;
+	__le32 *buf = data;
+	int ret;
 
-	for (count = 0; count < length; count += 4, address += 4) {
-		if (read) {
-			status = ath6kl_read_reg_diag(ar, &address,
-						      (u32 *) &data[count]);
-			if (status)
-				break;
-		} else {
-			status = ath6kl_write_reg_diag(ar, &address,
-						       (u32 *) &data[count]);
-			if (status)
-				break;
-		}
+	if (WARN_ON(length % 4))
+		return -EINVAL;
+
+	for (count = 0; count < length / 4; count++, address += 4) {
+		ret = ath6kl_diag_write32(ar, address, buf[count]);
+		if (ret)
+			return ret;
 	}
 
-	return status;
+	return 0;
 }
 
-static void ath6kl_reset_device(struct ath6kl *ar, u32 target_type,
-				bool wait_fot_compltn, bool cold_reset)
+int ath6kl_read_fwlogs(struct ath6kl *ar)
 {
-	int status = 0;
-	u32 address;
-	u32 data;
+	struct ath6kl_dbglog_hdr debug_hdr;
+	struct ath6kl_dbglog_buf debug_buf;
+	u32 address, length, dropped, firstbuf, debug_hdr_addr;
+	int ret, loop;
+	u8 *buf;
 
-	if (target_type != TARGET_TYPE_AR6003)
-		return;
+	buf = kmalloc(ATH6KL_FWLOG_PAYLOAD_SIZE, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
 
-	data = cold_reset ? RESET_CONTROL_COLD_RST : RESET_CONTROL_MBOX_RST;
+	address = TARG_VTOP(ar->target_type,
+			    ath6kl_get_hi_item_addr(ar,
+						    HI_ITEM(hi_dbglog_hdr)));
 
-	address = RTC_BASE_ADDRESS;
-	status = ath6kl_write_reg_diag(ar, &address, &data);
+	ret = ath6kl_diag_read32(ar, address, &debug_hdr_addr);
+	if (ret)
+		goto out;
 
-	if (status)
-		ath6kl_err("failed to reset target\n");
-}
+	/* Get the contents of the ring buffer */
+	if (debug_hdr_addr == 0) {
+		ath6kl_warn("Invalid address for debug_hdr_addr\n");
+		ret = -EINVAL;
+		goto out;
+	}
 
-void ath6kl_stop_endpoint(struct net_device *dev, bool keep_profile,
-			  bool get_dbglogs)
-{
-	struct ath6kl *ar = ath6kl_priv(dev);
-	static u8 bcast_mac[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-	bool discon_issued;
+	address = TARG_VTOP(ar->target_type, debug_hdr_addr);
+	ret = ath6kl_diag_read(ar, address, &debug_hdr, sizeof(debug_hdr));
+	if (ret)
+		goto out;
 
-	netif_stop_queue(dev);
+	address = TARG_VTOP(ar->target_type,
+			    le32_to_cpu(debug_hdr.dbuf_addr));
+	firstbuf = address;
+	dropped = le32_to_cpu(debug_hdr.dropped);
+	ret = ath6kl_diag_read(ar, address, &debug_buf, sizeof(debug_buf));
+	if (ret)
+		goto out;
 
-	/* disable the target and the interrupts associated with it */
-	if (test_bit(WMI_READY, &ar->flag)) {
-		discon_issued = (test_bit(CONNECTED, &ar->flag) ||
-				 test_bit(CONNECT_PEND, &ar->flag));
-		ath6kl_disconnect(ar);
-		if (!keep_profile)
-			ath6kl_init_profile_info(ar);
+	loop = 100;
 
-		del_timer(&ar->disconnect_timer);
+	do {
+		address = TARG_VTOP(ar->target_type,
+				    le32_to_cpu(debug_buf.buffer_addr));
+		length = le32_to_cpu(debug_buf.length);
 
-		clear_bit(WMI_READY, &ar->flag);
-		ath6kl_wmi_shutdown(ar->wmi);
-		clear_bit(WMI_ENABLED, &ar->flag);
-		ar->wmi = NULL;
+		if (length != 0 && (le32_to_cpu(debug_buf.length) <=
+				    le32_to_cpu(debug_buf.bufsize))) {
+			length = ALIGN(length, 4);
 
-		/*
-		 * After wmi_shudown all WMI events will be dropped. We
-		 * need to cleanup the buffers allocated in AP mode and
-		 * give disconnect notification to stack, which usually
-		 * happens in the disconnect_event. Simulate the disconnect
-		 * event by calling the function directly. Sometimes
-		 * disconnect_event will be received when the debug logs
-		 * are collected.
-		 */
-		if (discon_issued)
-			ath6kl_disconnect_event(ar, DISCONNECT_CMD,
-						(ar->nw_type & AP_NETWORK) ?
-						bcast_mac : ar->bssid,
-						0, NULL, 0);
+			ret = ath6kl_diag_read(ar, address,
+					       buf, length);
+			if (ret)
+				goto out;
 
-		ar->user_key_ctrl = 0;
-
-	} else {
-		ath6kl_dbg(ATH6KL_DBG_TRC,
-			   "%s: wmi is not ready 0x%p 0x%p\n",
-			   __func__, ar, ar->wmi);
-
-		/* Shut down WMI if we have started it */
-		if (test_bit(WMI_ENABLED, &ar->flag)) {
-			ath6kl_dbg(ATH6KL_DBG_TRC,
-				   "%s: shut down wmi\n", __func__);
-			ath6kl_wmi_shutdown(ar->wmi);
-			clear_bit(WMI_ENABLED, &ar->flag);
-			ar->wmi = NULL;
+			ath6kl_debug_fwlog_event(ar, buf, length);
 		}
-	}
 
-	if (ar->htc_target) {
-		ath6kl_dbg(ATH6KL_DBG_TRC, "%s: shut down htc\n", __func__);
-		htc_stop(ar->htc_target);
-	}
+		address = TARG_VTOP(ar->target_type,
+				    le32_to_cpu(debug_buf.next));
+		ret = ath6kl_diag_read(ar, address, &debug_buf,
+				       sizeof(debug_buf));
+		if (ret)
+			goto out;
 
-	/*
-	 * Try to reset the device if we can. The driver may have been
-	 * configure NOT to reset the target during a debug session.
-	 */
-	ath6kl_dbg(ATH6KL_DBG_TRC,
-		   "attempting to reset target on instance destroy\n");
-	ath6kl_reset_device(ar, ar->target_type, true, true);
+		loop--;
+
+		if (WARN_ON(loop == 0)) {
+			ret = -ETIMEDOUT;
+			goto out;
+		}
+	} while (address != firstbuf);
+
+out:
+	kfree(buf);
+
+	return ret;
 }
 
-static void ath6kl_install_static_wep_keys(struct ath6kl *ar)
+static void ath6kl_install_static_wep_keys(struct ath6kl_vif *vif)
 {
 	u8 index;
 	u8 keyusage;
 
-	for (index = WMI_MIN_KEY_INDEX; index <= WMI_MAX_KEY_INDEX; index++) {
-		if (ar->wep_key_list[index].key_len) {
+	for (index = 0; index <= WMI_MAX_KEY_INDEX; index++) {
+		if (vif->wep_key_list[index].key_len) {
 			keyusage = GROUP_USAGE;
-			if (index == ar->def_txkey_index)
+			if (index == vif->def_txkey_index)
 				keyusage |= TX_USAGE;
 
-			ath6kl_wmi_addkey_cmd(ar->wmi,
+			ath6kl_wmi_addkey_cmd(vif->ar->wmi, vif->fw_vif_idx,
 					      index,
 					      WEP_CRYPT,
 					      keyusage,
-					      ar->wep_key_list[index].key_len,
-					      NULL,
-					      ar->wep_key_list[index].key,
+					      vif->wep_key_list[index].key_len,
+					      NULL, 0,
+					      vif->wep_key_list[index].key,
 					      KEY_OP_INIT_VAL, NULL,
 					      NO_SYNC_WMIFLAG);
 		}
 	}
 }
 
-static void ath6kl_connect_ap_mode(struct ath6kl *ar, u16 channel, u8 *bssid,
-				   u16 listen_int, u16 beacon_int,
-				   u8 assoc_resp_len, u8 *assoc_info)
+void ath6kl_connect_ap_mode_bss(struct ath6kl_vif *vif, u16 channel)
 {
-	struct net_device *dev = ar->net_dev;
-	struct station_info sinfo;
+	struct ath6kl *ar = vif->ar;
 	struct ath6kl_req_key *ik;
-	enum crypto_type keyType = NONE_CRYPT;
+	int res;
+	u8 key_rsc[ATH6KL_KEY_SEQ_LEN];
 
-	if (memcmp(dev->dev_addr, bssid, ETH_ALEN) == 0) {
-		ik = &ar->ap_mode_bkey;
+	ik = &ar->ap_mode_bkey;
 
-		switch (ar->auth_mode) {
-		case NONE_AUTH:
-			if (ar->prwise_crypto == WEP_CRYPT)
-				ath6kl_install_static_wep_keys(ar);
+	ath6kl_dbg(ATH6KL_DBG_WLAN_CFG, "AP mode started on %u MHz\n", channel);
+
+	switch (vif->auth_mode) {
+	case NONE_AUTH:
+		if (vif->prwise_crypto == WEP_CRYPT)
+			ath6kl_install_static_wep_keys(vif);
+		if (!ik->valid || ik->key_type != WAPI_CRYPT)
 			break;
-		case WPA_PSK_AUTH:
-		case WPA2_PSK_AUTH:
-		case (WPA_PSK_AUTH|WPA2_PSK_AUTH):
-			switch (ik->ik_type) {
-			case ATH6KL_CIPHER_TKIP:
-				keyType = TKIP_CRYPT;
-				break;
-			case ATH6KL_CIPHER_AES_CCM:
-				keyType = AES_CRYPT;
-				break;
-			default:
-				goto skip_key;
-			}
-			ath6kl_wmi_addkey_cmd(ar->wmi, ik->ik_keyix, keyType,
-					      GROUP_USAGE, ik->ik_keylen,
-					      (u8 *)&ik->ik_keyrsc,
-					      ik->ik_keydata,
-					      KEY_OP_INIT_VAL, ik->ik_macaddr,
-					      SYNC_BOTH_WMIFLAG);
+		/* for WAPI, we need to set the delayed group key, continue: */
+	case WPA_PSK_AUTH:
+	case WPA2_PSK_AUTH:
+	case (WPA_PSK_AUTH | WPA2_PSK_AUTH):
+		if (!ik->valid)
 			break;
+
+		ath6kl_dbg(ATH6KL_DBG_WLAN_CFG,
+			   "Delayed addkey for the initial group key for AP mode\n");
+		memset(key_rsc, 0, sizeof(key_rsc));
+		res = ath6kl_wmi_addkey_cmd(
+			ar->wmi, vif->fw_vif_idx, ik->key_index, ik->key_type,
+			GROUP_USAGE, ik->key_len, key_rsc, ATH6KL_KEY_SEQ_LEN,
+			ik->key,
+			KEY_OP_INIT_VAL, NULL, SYNC_BOTH_WMIFLAG);
+		if (res) {
+			ath6kl_dbg(ATH6KL_DBG_WLAN_CFG,
+				   "Delayed addkey failed: %d\n", res);
 		}
-skip_key:
-		set_bit(CONNECTED, &ar->flag);
-		return;
+		break;
 	}
 
-	ath6kl_dbg(ATH6KL_DBG_TRC, "new station %pM aid=%d\n",
-		   bssid, channel);
+	if (ar->last_ch != channel)
+		/* we actually don't know the phymode, default to HT20 */
+		ath6kl_cfg80211_ch_switch_notify(vif, channel, WMI_11G_HT20);
 
-	ath6kl_add_new_sta(ar, bssid, channel, assoc_info, assoc_resp_len,
-			   listen_int & 0xFF, beacon_int,
-			   (listen_int >> 8) & 0xFF);
+	ath6kl_wmi_bssfilter_cmd(ar->wmi, vif->fw_vif_idx, NONE_BSS_FILTER, 0);
+	set_bit(CONNECTED, &vif->flags);
+	netif_carrier_on(vif->ndev);
+}
+
+void ath6kl_connect_ap_mode_sta(struct ath6kl_vif *vif, u16 aid, u8 *mac_addr,
+				u8 keymgmt, u8 ucipher, u8 auth,
+				u8 assoc_req_len, u8 *assoc_info, u8 apsd_info)
+{
+	u8 *ies = NULL, *wpa_ie = NULL, *pos;
+	size_t ies_len = 0;
+	struct station_info sinfo;
+
+	ath6kl_dbg(ATH6KL_DBG_TRC, "new station %pM aid=%d\n", mac_addr, aid);
+
+	if (assoc_req_len > sizeof(struct ieee80211_hdr_3addr)) {
+		struct ieee80211_mgmt *mgmt =
+			(struct ieee80211_mgmt *) assoc_info;
+		if (ieee80211_is_assoc_req(mgmt->frame_control) &&
+		    assoc_req_len >= sizeof(struct ieee80211_hdr_3addr) +
+		    sizeof(mgmt->u.assoc_req)) {
+			ies = mgmt->u.assoc_req.variable;
+			ies_len = assoc_info + assoc_req_len - ies;
+		} else if (ieee80211_is_reassoc_req(mgmt->frame_control) &&
+			   assoc_req_len >= sizeof(struct ieee80211_hdr_3addr)
+			   + sizeof(mgmt->u.reassoc_req)) {
+			ies = mgmt->u.reassoc_req.variable;
+			ies_len = assoc_info + assoc_req_len - ies;
+		}
+	}
+
+	pos = ies;
+	while (pos && pos + 1 < ies + ies_len) {
+		if (pos + 2 + pos[1] > ies + ies_len)
+			break;
+		if (pos[0] == WLAN_EID_RSN)
+			wpa_ie = pos; /* RSN IE */
+		else if (pos[0] == WLAN_EID_VENDOR_SPECIFIC &&
+			 pos[1] >= 4 &&
+			 pos[2] == 0x00 && pos[3] == 0x50 && pos[4] == 0xf2) {
+			if (pos[5] == 0x01)
+				wpa_ie = pos; /* WPA IE */
+			else if (pos[5] == 0x04) {
+				wpa_ie = pos; /* WPS IE */
+				break; /* overrides WPA/RSN IE */
+			}
+		} else if (pos[0] == 0x44 && wpa_ie == NULL) {
+			/*
+			 * Note: WAPI Parameter Set IE re-uses Element ID that
+			 * was officially allocated for BSS AC Access Delay. As
+			 * such, we need to be a bit more careful on when
+			 * parsing the frame. However, BSS AC Access Delay
+			 * element is not supposed to be included in
+			 * (Re)Association Request frames, so this should not
+			 * cause problems.
+			 */
+			wpa_ie = pos; /* WAPI IE */
+			break;
+		}
+		pos += 2 + pos[1];
+	}
+
+	ath6kl_add_new_sta(vif, mac_addr, aid, wpa_ie,
+			   wpa_ie ? 2 + wpa_ie[1] : 0,
+			   keymgmt, ucipher, auth, apsd_info);
 
 	/* send event to application */
 	memset(&sinfo, 0, sizeof(sinfo));
 
 	/* TODO: sinfo.generation */
-	/* TODO: need to deliver (Re)AssocReq IEs somehow.. change in
-	 * cfg80211 needed, e.g., by adding those into sinfo
-	 */
-	cfg80211_new_sta(ar->net_dev, bssid, &sinfo, GFP_KERNEL);
 
-	netif_wake_queue(ar->net_dev);
+	sinfo.assoc_req_ies = ies;
+	sinfo.assoc_req_ies_len = ies_len;
+	sinfo.filled |= STATION_INFO_ASSOC_REQ_IES;
 
-	return;
-}
+	cfg80211_new_sta(vif->ndev, mac_addr, &sinfo, GFP_KERNEL);
 
-/* Functions for Tx credit handling */
-void ath6k_credit_init(struct htc_credit_state_info *cred_info,
-		       struct list_head *ep_list,
-		       int tot_credits)
-{
-	struct htc_endpoint_credit_dist *cur_ep_dist;
-	int count;
-
-	cred_info->cur_free_credits = tot_credits;
-	cred_info->total_avail_credits = tot_credits;
-
-	list_for_each_entry(cur_ep_dist, ep_list, list) {
-		if (cur_ep_dist->endpoint == ENDPOINT_0)
-			continue;
-
-		cur_ep_dist->cred_min = cur_ep_dist->cred_per_msg;
-
-		if (tot_credits > 4)
-			if ((cur_ep_dist->svc_id == WMI_DATA_BK_SVC) ||
-			    (cur_ep_dist->svc_id == WMI_DATA_BE_SVC)) {
-				ath6kl_deposit_credit_to_ep(cred_info,
-						cur_ep_dist,
-						cur_ep_dist->cred_min);
-				cur_ep_dist->dist_flags |= HTC_EP_ACTIVE;
-			}
-
-		if (cur_ep_dist->svc_id == WMI_CONTROL_SVC) {
-			ath6kl_deposit_credit_to_ep(cred_info, cur_ep_dist,
-						    cur_ep_dist->cred_min);
-			/*
-			 * Control service is always marked active, it
-			 * never goes inactive EVER.
-			 */
-			cur_ep_dist->dist_flags |= HTC_EP_ACTIVE;
-		} else if (cur_ep_dist->svc_id == WMI_DATA_BK_SVC)
-			/* this is the lowest priority data endpoint */
-			cred_info->lowestpri_ep_dist = cur_ep_dist->list;
-
-		/*
-		 * Streams have to be created (explicit | implicit) for all
-		 * kinds of traffic. BE endpoints are also inactive in the
-		 * beginning. When BE traffic starts it creates implicit
-		 * streams that redistributes credits.
-		 *
-		 * Note: all other endpoints have minimums set but are
-		 * initially given NO credits. credits will be distributed
-		 * as traffic activity demands
-		 */
-	}
-
-	WARN_ON(cred_info->cur_free_credits <= 0);
-
-	list_for_each_entry(cur_ep_dist, ep_list, list) {
-		if (cur_ep_dist->endpoint == ENDPOINT_0)
-			continue;
-
-		if (cur_ep_dist->svc_id == WMI_CONTROL_SVC)
-			cur_ep_dist->cred_norm = cur_ep_dist->cred_per_msg;
-		else {
-			/*
-			 * For the remaining data endpoints, we assume that
-			 * each cred_per_msg are the same. We use a simple
-			 * calculation here, we take the remaining credits
-			 * and determine how many max messages this can
-			 * cover and then set each endpoint's normal value
-			 * equal to 3/4 this amount.
-			 */
-			count = (cred_info->cur_free_credits /
-				 cur_ep_dist->cred_per_msg)
-				* cur_ep_dist->cred_per_msg;
-			count = (count * 3) >> 2;
-			count = max(count, cur_ep_dist->cred_per_msg);
-			cur_ep_dist->cred_norm = count;
-
-		}
-	}
-}
-
-/* initialize and setup credit distribution */
-int ath6k_setup_credit_dist(void *htc_handle,
-			    struct htc_credit_state_info *cred_info)
-{
-	u16 servicepriority[5];
-
-	memset(cred_info, 0, sizeof(struct htc_credit_state_info));
-
-	servicepriority[0] = WMI_CONTROL_SVC;  /* highest */
-	servicepriority[1] = WMI_DATA_VO_SVC;
-	servicepriority[2] = WMI_DATA_VI_SVC;
-	servicepriority[3] = WMI_DATA_BE_SVC;
-	servicepriority[4] = WMI_DATA_BK_SVC; /* lowest */
-
-	/* set priority list */
-	htc_set_credit_dist(htc_handle, cred_info, servicepriority, 5);
-
-	return 0;
-}
-
-/* reduce an ep's credits back to a set limit */
-static void ath6k_reduce_credits(struct htc_credit_state_info *cred_info,
-				 struct htc_endpoint_credit_dist  *ep_dist,
-				 int limit)
-{
-	int credits;
-
-	ep_dist->cred_assngd = limit;
-
-	if (ep_dist->credits <= limit)
-		return;
-
-	credits = ep_dist->credits - limit;
-	ep_dist->credits -= credits;
-	cred_info->cur_free_credits += credits;
-}
-
-static void ath6k_credit_update(struct htc_credit_state_info *cred_info,
-				struct list_head *epdist_list)
-{
-	struct htc_endpoint_credit_dist *cur_dist_list;
-
-	list_for_each_entry(cur_dist_list, epdist_list, list) {
-		if (cur_dist_list->endpoint == ENDPOINT_0)
-			continue;
-
-		if (cur_dist_list->cred_to_dist > 0) {
-			cur_dist_list->credits +=
-					cur_dist_list->cred_to_dist;
-			cur_dist_list->cred_to_dist = 0;
-			if (cur_dist_list->credits >
-			    cur_dist_list->cred_assngd)
-				ath6k_reduce_credits(cred_info,
-						cur_dist_list,
-						cur_dist_list->cred_assngd);
-
-			if (cur_dist_list->credits >
-			    cur_dist_list->cred_norm)
-				ath6k_reduce_credits(cred_info, cur_dist_list,
-						     cur_dist_list->cred_norm);
-
-			if (!(cur_dist_list->dist_flags & HTC_EP_ACTIVE)) {
-				if (cur_dist_list->txq_depth == 0)
-					ath6k_reduce_credits(cred_info,
-							     cur_dist_list, 0);
-			}
-		}
-	}
-}
-
-/*
- * HTC has an endpoint that needs credits, ep_dist is the endpoint in
- * question.
- */
-void ath6k_seek_credits(struct htc_credit_state_info *cred_info,
-			struct htc_endpoint_credit_dist *ep_dist)
-{
-	struct htc_endpoint_credit_dist *curdist_list;
-	int credits = 0;
-	int need;
-
-	if (ep_dist->svc_id == WMI_CONTROL_SVC)
-		goto out;
-
-	if ((ep_dist->svc_id == WMI_DATA_VI_SVC) ||
-	    (ep_dist->svc_id == WMI_DATA_VO_SVC))
-		if ((ep_dist->cred_assngd >= ep_dist->cred_norm))
-			goto out;
-
-	/*
-	 * For all other services, we follow a simple algorithm of:
-	 *
-	 * 1. checking the free pool for credits
-	 * 2. checking lower priority endpoints for credits to take
-	 */
-
-	credits = min(cred_info->cur_free_credits, ep_dist->seek_cred);
-
-	if (credits >= ep_dist->seek_cred)
-		goto out;
-
-	/*
-	 * We don't have enough in the free pool, try taking away from
-	 * lower priority services The rule for taking away credits:
-	 *
-	 *   1. Only take from lower priority endpoints
-	 *   2. Only take what is allocated above the minimum (never
-	 *      starve an endpoint completely)
-	 *   3. Only take what you need.
-	 */
-
-	list_for_each_entry_reverse(curdist_list,
-				    &cred_info->lowestpri_ep_dist,
-				    list) {
-		if (curdist_list == ep_dist)
-			break;
-
-		need = ep_dist->seek_cred - cred_info->cur_free_credits;
-
-		if ((curdist_list->cred_assngd - need) >=
-		     curdist_list->cred_min) {
-			/*
-			 * The current one has been allocated more than
-			 * it's minimum and it has enough credits assigned
-			 * above it's minimum to fulfill our need try to
-			 * take away just enough to fulfill our need.
-			 */
-			ath6k_reduce_credits(cred_info, curdist_list,
-					curdist_list->cred_assngd - need);
-
-			if (cred_info->cur_free_credits >=
-			    ep_dist->seek_cred)
-				break;
-		}
-
-		if (curdist_list->endpoint == ENDPOINT_0)
-			break;
-	}
-
-	credits = min(cred_info->cur_free_credits, ep_dist->seek_cred);
-
-out:
-	/* did we find some credits? */
-	if (credits)
-		ath6kl_deposit_credit_to_ep(cred_info, ep_dist, credits);
-
-	ep_dist->seek_cred = 0;
-}
-
-/* redistribute credits based on activity change */
-static void ath6k_redistribute_credits(struct htc_credit_state_info *info,
-				       struct list_head *ep_dist_list)
-{
-	struct htc_endpoint_credit_dist *curdist_list;
-
-	list_for_each_entry(curdist_list, ep_dist_list, list) {
-		if (curdist_list->endpoint == ENDPOINT_0)
-			continue;
-
-		if ((curdist_list->svc_id == WMI_DATA_BK_SVC)  ||
-		    (curdist_list->svc_id == WMI_DATA_BE_SVC))
-			curdist_list->dist_flags |= HTC_EP_ACTIVE;
-
-		if ((curdist_list->svc_id != WMI_CONTROL_SVC) &&
-		    !(curdist_list->dist_flags & HTC_EP_ACTIVE)) {
-			if (curdist_list->txq_depth == 0)
-				ath6k_reduce_credits(info,
-						curdist_list, 0);
-			else
-				ath6k_reduce_credits(info,
-						curdist_list,
-						curdist_list->cred_min);
-		}
-	}
-}
-
-/*
- *
- * This function is invoked whenever endpoints require credit
- * distributions. A lock is held while this function is invoked, this
- * function shall NOT block. The ep_dist_list is a list of distribution
- * structures in prioritized order as defined by the call to the
- * htc_set_credit_dist() api.
- */
-void ath6k_credit_distribute(struct htc_credit_state_info *cred_info,
-			     struct list_head *ep_dist_list,
-			     enum htc_credit_dist_reason reason)
-{
-	switch (reason) {
-	case HTC_CREDIT_DIST_SEND_COMPLETE:
-		ath6k_credit_update(cred_info, ep_dist_list);
-		break;
-	case HTC_CREDIT_DIST_ACTIVITY_CHANGE:
-		ath6k_redistribute_credits(cred_info, ep_dist_list);
-		break;
-	default:
-		break;
-	}
-
-	WARN_ON(cred_info->cur_free_credits > cred_info->total_avail_credits);
-	WARN_ON(cred_info->cur_free_credits < 0);
+	netif_wake_queue(vif->ndev);
 }
 
 void disconnect_timer_handler(unsigned long ptr)
 {
 	struct net_device *dev = (struct net_device *)ptr;
-	struct ath6kl *ar = ath6kl_priv(dev);
+	struct ath6kl_vif *vif = netdev_priv(dev);
 
-	ath6kl_init_profile_info(ar);
-	ath6kl_disconnect(ar);
+	ath6kl_init_profile_info(vif);
+	ath6kl_disconnect(vif);
 }
 
-void ath6kl_disconnect(struct ath6kl *ar)
+void ath6kl_disconnect(struct ath6kl_vif *vif)
 {
-	if (test_bit(CONNECTED, &ar->flag) ||
-	    test_bit(CONNECT_PEND, &ar->flag)) {
-		ath6kl_wmi_disconnect_cmd(ar->wmi);
+	if (test_bit(CONNECTED, &vif->flags) ||
+	    test_bit(CONNECT_PEND, &vif->flags)) {
+		ath6kl_wmi_disconnect_cmd(vif->ar->wmi, vif->fw_vif_idx);
 		/*
 		 * Disconnect command is issued, clear the connect pending
 		 * flag. The connected flag will be cleared in
 		 * disconnect event notification.
 		 */
-		clear_bit(CONNECT_PEND, &ar->flag);
+		clear_bit(CONNECT_PEND, &vif->flags);
 	}
 }
 
 /* WMI Event handlers */
 
-static const char *get_hw_id_string(u32 id)
-{
-	switch (id) {
-	case AR6003_REV1_VERSION:
-		return "1.0";
-	case AR6003_REV2_VERSION:
-		return "2.0";
-	case AR6003_REV3_VERSION:
-		return "2.1.1";
-	default:
-		return "unknown";
-	}
-}
-
-void ath6kl_ready_event(void *devt, u8 *datap, u32 sw_ver, u32 abi_ver)
+void ath6kl_ready_event(void *devt, u8 *datap, u32 sw_ver, u32 abi_ver,
+			enum wmi_phy_cap cap)
 {
 	struct ath6kl *ar = devt;
-	struct net_device *dev = ar->net_dev;
 
-	memcpy(dev->dev_addr, datap, ETH_ALEN);
-	ath6kl_dbg(ATH6KL_DBG_TRC, "%s: mac addr = %pM\n",
-		   __func__, dev->dev_addr);
+	memcpy(ar->mac_addr, datap, ETH_ALEN);
+
+	ath6kl_dbg(ATH6KL_DBG_BOOT,
+		   "ready event mac addr %pM sw_ver 0x%x abi_ver 0x%x cap 0x%x\n",
+		   ar->mac_addr, sw_ver, abi_ver, cap);
 
 	ar->version.wlan_ver = sw_ver;
 	ar->version.abi_ver = abi_ver;
+	ar->hw.cap = cap;
 
-	snprintf(ar->wdev->wiphy->fw_version,
-		 sizeof(ar->wdev->wiphy->fw_version),
-		 "%u.%u.%u.%u",
-		 (ar->version.wlan_ver & 0xf0000000) >> 28,
-		 (ar->version.wlan_ver & 0x0f000000) >> 24,
-		 (ar->version.wlan_ver & 0x00ff0000) >> 16,
-		 (ar->version.wlan_ver & 0x0000ffff));
+	if (strlen(ar->wiphy->fw_version) == 0) {
+		snprintf(ar->wiphy->fw_version,
+			 sizeof(ar->wiphy->fw_version),
+			 "%u.%u.%u.%u",
+			 (ar->version.wlan_ver & 0xf0000000) >> 28,
+			 (ar->version.wlan_ver & 0x0f000000) >> 24,
+			 (ar->version.wlan_ver & 0x00ff0000) >> 16,
+			 (ar->version.wlan_ver & 0x0000ffff));
+	}
 
 	/* indicate to the waiting thread that the ready event was received */
 	set_bit(WMI_READY, &ar->flag);
 	wake_up(&ar->event_wq);
-
-	ath6kl_info("hw %s fw %s\n",
-		    get_hw_id_string(ar->wdev->wiphy->hw_version),
-		    ar->wdev->wiphy->fw_version);
 }
 
-void ath6kl_scan_complete_evt(struct ath6kl *ar, int status)
+void ath6kl_scan_complete_evt(struct ath6kl_vif *vif, int status)
 {
-	ath6kl_cfg80211_scan_complete_event(ar, status);
+	struct ath6kl *ar = vif->ar;
+	bool aborted = false;
 
-	if (!ar->usr_bss_filter)
-		ath6kl_wmi_bssfilter_cmd(ar->wmi, NONE_BSS_FILTER, 0);
+	if (status != WMI_SCAN_STATUS_SUCCESS)
+		aborted = true;
 
-	ath6kl_dbg(ATH6KL_DBG_WLAN_SCAN, "scan complete: %d\n", status);
+	ath6kl_cfg80211_scan_complete_event(vif, aborted);
+
+	if (!ar->usr_bss_filter) {
+		clear_bit(CLEAR_BSSFILTER_ON_BEACON, &vif->flags);
+		ath6kl_wmi_bssfilter_cmd(ar->wmi, vif->fw_vif_idx,
+					 NONE_BSS_FILTER, 0);
+	}
+
+	ath6kl_dbg(ATH6KL_DBG_WLAN_CFG, "scan complete: %d\n", status);
 }
 
-void ath6kl_connect_event(struct ath6kl *ar, u16 channel, u8 *bssid,
+static int ath6kl_commit_ch_switch(struct ath6kl_vif *vif, u16 channel)
+{
+
+	struct ath6kl *ar = vif->ar;
+
+	vif->profile.ch = cpu_to_le16(channel);
+
+	switch (vif->nw_type) {
+	case AP_NETWORK:
+		/*
+		 * reconfigure any saved RSN IE capabilites in the beacon /
+		 * probe response to stay in sync with the supplicant.
+		 */
+		if (vif->rsn_capab &&
+		    test_bit(ATH6KL_FW_CAPABILITY_RSN_CAP_OVERRIDE,
+			     ar->fw_capabilities))
+			ath6kl_wmi_set_ie_cmd(ar->wmi, vif->fw_vif_idx,
+					      WLAN_EID_RSN, WMI_RSN_IE_CAPB,
+					      (const u8 *) &vif->rsn_capab,
+					      sizeof(vif->rsn_capab));
+
+		return ath6kl_wmi_ap_profile_commit(ar->wmi, vif->fw_vif_idx,
+						    &vif->profile);
+	default:
+		ath6kl_err("won't switch channels nw_type=%d\n", vif->nw_type);
+		return -ENOTSUPP;
+	}
+}
+
+static void ath6kl_check_ch_switch(struct ath6kl *ar, u16 channel)
+{
+
+	struct ath6kl_vif *vif;
+	int res = 0;
+
+	if (!ar->want_ch_switch)
+		return;
+
+	spin_lock_bh(&ar->list_lock);
+	list_for_each_entry(vif, &ar->vif_list, list) {
+		if (ar->want_ch_switch & (1 << vif->fw_vif_idx))
+			res = ath6kl_commit_ch_switch(vif, channel);
+
+		/* if channel switch failed, oh well we tried */
+		ar->want_ch_switch &= ~(1 << vif->fw_vif_idx);
+
+		if (res)
+			ath6kl_err("channel switch failed nw_type %d res %d\n",
+				   vif->nw_type, res);
+	}
+	spin_unlock_bh(&ar->list_lock);
+}
+
+void ath6kl_connect_event(struct ath6kl_vif *vif, u16 channel, u8 *bssid,
 			  u16 listen_int, u16 beacon_int,
 			  enum network_type net_type, u8 beacon_ie_len,
 			  u8 assoc_req_len, u8 assoc_resp_len,
 			  u8 *assoc_info)
 {
-	unsigned long flags;
+	struct ath6kl *ar = vif->ar;
 
-	if (ar->nw_type == AP_NETWORK) {
-		ath6kl_connect_ap_mode(ar, channel, bssid, listen_int,
-				       beacon_int, assoc_resp_len,
-				       assoc_info);
-		return;
-	}
-
-	ath6kl_cfg80211_connect_event(ar, channel, bssid,
+	ath6kl_cfg80211_connect_event(vif, channel, bssid,
 				      listen_int, beacon_int,
 				      net_type, beacon_ie_len,
 				      assoc_req_len, assoc_resp_len,
 				      assoc_info);
 
-	memcpy(ar->bssid, bssid, sizeof(ar->bssid));
-	ar->bss_ch = channel;
+	memcpy(vif->bssid, bssid, sizeof(vif->bssid));
+	vif->bss_ch = channel;
 
-	if ((ar->nw_type == INFRA_NETWORK))
-		ath6kl_wmi_listeninterval_cmd(ar->wmi, ar->listen_intvl_t,
-					      ar->listen_intvl_b);
+	if ((vif->nw_type == INFRA_NETWORK)) {
+		ath6kl_wmi_listeninterval_cmd(ar->wmi, vif->fw_vif_idx,
+					      vif->listen_intvl_t, 0);
+		ath6kl_check_ch_switch(ar, channel);
+	}
 
-	netif_wake_queue(ar->net_dev);
+	netif_wake_queue(vif->ndev);
 
 	/* Update connect & link status atomically */
-	spin_lock_irqsave(&ar->lock, flags);
-	set_bit(CONNECTED, &ar->flag);
-	clear_bit(CONNECT_PEND, &ar->flag);
-	netif_carrier_on(ar->net_dev);
-	spin_unlock_irqrestore(&ar->lock, flags);
+	spin_lock_bh(&vif->if_lock);
+	set_bit(CONNECTED, &vif->flags);
+	clear_bit(CONNECT_PEND, &vif->flags);
+	netif_carrier_on(vif->ndev);
+	spin_unlock_bh(&vif->if_lock);
 
-	aggr_reset_state(ar->aggr_cntxt);
-	ar->reconnect_flag = 0;
+	aggr_reset_state(vif->aggr_cntxt->aggr_conn);
+	vif->reconnect_flag = 0;
 
-	if ((ar->nw_type == ADHOC_NETWORK) && ar->ibss_ps_enable) {
+	if ((vif->nw_type == ADHOC_NETWORK) && ar->ibss_ps_enable) {
 		memset(ar->node_map, 0, sizeof(ar->node_map));
 		ar->node_num = 0;
 		ar->next_ep_id = ENDPOINT_2;
 	}
 
-	if (!ar->usr_bss_filter)
-		ath6kl_wmi_bssfilter_cmd(ar->wmi, NONE_BSS_FILTER, 0);
+	if (!ar->usr_bss_filter) {
+		set_bit(CLEAR_BSSFILTER_ON_BEACON, &vif->flags);
+		ath6kl_wmi_bssfilter_cmd(ar->wmi, vif->fw_vif_idx,
+					 CURRENT_BSS_FILTER, 0);
+	}
 }
 
-void ath6kl_tkip_micerr_event(struct ath6kl *ar, u8 keyid, bool ismcast)
+void ath6kl_tkip_micerr_event(struct ath6kl_vif *vif, u8 keyid, bool ismcast)
 {
 	struct ath6kl_sta *sta;
+	struct ath6kl *ar = vif->ar;
 	u8 tsc[6];
+
 	/*
 	 * For AP case, keyid will have aid of STA which sent pkt with
 	 * MIC error. Use this aid to get MAC & send it to hostapd.
 	 */
-	if (ar->nw_type == AP_NETWORK) {
+	if (vif->nw_type == AP_NETWORK) {
 		sta = ath6kl_find_sta_by_aid(ar, (keyid >> 2));
 		if (!sta)
 			return;
@@ -901,39 +686,25 @@ void ath6kl_tkip_micerr_event(struct ath6kl *ar, u8 keyid, bool ismcast)
 			   "ap tkip mic error received from aid=%d\n", keyid);
 
 		memset(tsc, 0, sizeof(tsc)); /* FIX: get correct TSC */
-		cfg80211_michael_mic_failure(ar->net_dev, sta->mac,
+		cfg80211_michael_mic_failure(vif->ndev, sta->mac,
 					     NL80211_KEYTYPE_PAIRWISE, keyid,
 					     tsc, GFP_KERNEL);
 	} else
-		ath6kl_cfg80211_tkip_micerr_event(ar, keyid, ismcast);
+		ath6kl_cfg80211_tkip_micerr_event(vif, keyid, ismcast);
 
 }
 
-static void ath6kl_update_target_stats(struct ath6kl *ar, u8 *ptr, u32 len)
+static void ath6kl_update_target_stats(struct ath6kl_vif *vif, u8 *ptr, u32 len)
 {
 	struct wmi_target_stats *tgt_stats =
 		(struct wmi_target_stats *) ptr;
-	struct target_stats *stats = &ar->target_stats;
+	struct ath6kl *ar = vif->ar;
+	struct target_stats *stats = &vif->target_stats;
 	struct tkip_ccmp_stats *ccmp_stats;
-	struct bss *conn_bss = NULL;
-	struct cserv_stats *c_stats;
 	u8 ac;
 
 	if (len < sizeof(*tgt_stats))
 		return;
-
-	/* update the RSSI of the connected bss */
-	if (test_bit(CONNECTED, &ar->flag)) {
-		conn_bss = ath6kl_wmi_find_node(ar->wmi, ar->bssid);
-		if (conn_bss) {
-			c_stats = &tgt_stats->cserv_stats;
-			conn_bss->ni_rssi =
-				a_sle16_to_cpu(c_stats->cs_ave_beacon_rssi);
-			conn_bss->ni_snr =
-				tgt_stats->cserv_stats.cs_ave_beacon_snr;
-			ath6kl_wmi_node_return(ar->wmi, conn_bss);
-		}
-	}
 
 	ath6kl_dbg(ATH6KL_DBG_TRC, "updating target stats\n");
 
@@ -1024,8 +795,12 @@ static void ath6kl_update_target_stats(struct ath6kl *ar, u8 *ptr, u32 len)
 	stats->wow_evt_discarded +=
 		le16_to_cpu(tgt_stats->wow_stats.wow_evt_discarded);
 
-	if (test_bit(STATS_UPDATE_PEND, &ar->flag)) {
-		clear_bit(STATS_UPDATE_PEND, &ar->flag);
+	stats->arp_received = le32_to_cpu(tgt_stats->arp_stats.arp_received);
+	stats->arp_replied = le32_to_cpu(tgt_stats->arp_stats.arp_replied);
+	stats->arp_matched = le32_to_cpu(tgt_stats->arp_stats.arp_matched);
+
+	if (test_bit(STATS_UPDATE_PEND, &vif->flags)) {
+		clear_bit(STATS_UPDATE_PEND, &vif->flags);
 		wake_up(&ar->event_wq);
 	}
 }
@@ -1035,14 +810,15 @@ static void ath6kl_add_le32(__le32 *var, __le32 val)
 	*var = cpu_to_le32(le32_to_cpu(*var) + le32_to_cpu(val));
 }
 
-void ath6kl_tgt_stats_event(struct ath6kl *ar, u8 *ptr, u32 len)
+void ath6kl_tgt_stats_event(struct ath6kl_vif *vif, u8 *ptr, u32 len)
 {
 	struct wmi_ap_mode_stat *p = (struct wmi_ap_mode_stat *) ptr;
+	struct ath6kl *ar = vif->ar;
 	struct wmi_ap_mode_stat *ap = &ar->ap_stats;
 	struct wmi_per_sta_stat *st_ap, *st_p;
 	u8 ac;
 
-	if (ar->nw_type == AP_NETWORK) {
+	if (vif->nw_type == AP_NETWORK) {
 		if (len < sizeof(*p))
 			return;
 
@@ -1061,7 +837,7 @@ void ath6kl_tgt_stats_event(struct ath6kl *ar, u8 *ptr, u32 len)
 		}
 
 	} else {
-		ath6kl_update_target_stats(ar, ptr, len);
+		ath6kl_update_target_stats(vif, ptr, len);
 	}
 }
 
@@ -1080,11 +856,13 @@ void ath6kl_txpwr_rx_evt(void *devt, u8 tx_pwr)
 	wake_up(&ar->event_wq);
 }
 
-void ath6kl_pspoll_event(struct ath6kl *ar, u8 aid)
+void ath6kl_pspoll_event(struct ath6kl_vif *vif, u8 aid)
 {
 	struct ath6kl_sta *conn;
 	struct sk_buff *skb;
 	bool psq_empty = false;
+	struct ath6kl *ar = vif->ar;
+	struct ath6kl_mgmt_buff *mgmt_buf;
 
 	conn = ath6kl_find_sta_by_aid(ar, aid);
 
@@ -1095,7 +873,7 @@ void ath6kl_pspoll_event(struct ath6kl *ar, u8 aid)
 	 * becomes empty update the PVB for this station.
 	 */
 	spin_lock_bh(&conn->psq_lock);
-	psq_empty  = skb_queue_empty(&conn->psq);
+	psq_empty  = skb_queue_empty(&conn->psq) && (conn->mgmt_psq_len == 0);
 	spin_unlock_bh(&conn->psq_lock);
 
 	if (psq_empty)
@@ -1103,25 +881,42 @@ void ath6kl_pspoll_event(struct ath6kl *ar, u8 aid)
 		return;
 
 	spin_lock_bh(&conn->psq_lock);
-	skb = skb_dequeue(&conn->psq);
-	spin_unlock_bh(&conn->psq_lock);
+	if (conn->mgmt_psq_len > 0) {
+		mgmt_buf = list_first_entry(&conn->mgmt_psq,
+					struct ath6kl_mgmt_buff, list);
+		list_del(&mgmt_buf->list);
+		conn->mgmt_psq_len--;
+		spin_unlock_bh(&conn->psq_lock);
 
-	conn->sta_flags |= STA_PS_POLLED;
-	ath6kl_data_tx(skb, ar->net_dev);
-	conn->sta_flags &= ~STA_PS_POLLED;
+		conn->sta_flags |= STA_PS_POLLED;
+		ath6kl_wmi_send_mgmt_cmd(ar->wmi, vif->fw_vif_idx,
+					 mgmt_buf->id, mgmt_buf->freq,
+					 mgmt_buf->wait, mgmt_buf->buf,
+					 mgmt_buf->len, mgmt_buf->no_cck);
+		conn->sta_flags &= ~STA_PS_POLLED;
+		kfree(mgmt_buf);
+	} else {
+		skb = skb_dequeue(&conn->psq);
+		spin_unlock_bh(&conn->psq_lock);
+
+		conn->sta_flags |= STA_PS_POLLED;
+		ath6kl_data_tx(skb, vif->ndev);
+		conn->sta_flags &= ~STA_PS_POLLED;
+	}
 
 	spin_lock_bh(&conn->psq_lock);
-	psq_empty  = skb_queue_empty(&conn->psq);
+	psq_empty  = skb_queue_empty(&conn->psq) && (conn->mgmt_psq_len == 0);
 	spin_unlock_bh(&conn->psq_lock);
 
 	if (psq_empty)
-		ath6kl_wmi_set_pvb_cmd(ar->wmi, conn->aid, 0);
+		ath6kl_wmi_set_pvb_cmd(ar->wmi, vif->fw_vif_idx, conn->aid, 0);
 }
 
-void ath6kl_dtimexpiry_event(struct ath6kl *ar)
+void ath6kl_dtimexpiry_event(struct ath6kl_vif *vif)
 {
 	bool mcastq_empty = false;
 	struct sk_buff *skb;
+	struct ath6kl *ar = vif->ar;
 
 	/*
 	 * If there are no associated STAs, ignore the DTIM expiry event.
@@ -1143,32 +938,53 @@ void ath6kl_dtimexpiry_event(struct ath6kl *ar)
 		return;
 
 	/* set the STA flag to dtim_expired for the frame to go out */
-	set_bit(DTIM_EXPIRED, &ar->flag);
+	set_bit(DTIM_EXPIRED, &vif->flags);
 
 	spin_lock_bh(&ar->mcastpsq_lock);
 	while ((skb = skb_dequeue(&ar->mcastpsq)) != NULL) {
 		spin_unlock_bh(&ar->mcastpsq_lock);
 
-		ath6kl_data_tx(skb, ar->net_dev);
+		ath6kl_data_tx(skb, vif->ndev);
 
 		spin_lock_bh(&ar->mcastpsq_lock);
 	}
 	spin_unlock_bh(&ar->mcastpsq_lock);
 
-	clear_bit(DTIM_EXPIRED, &ar->flag);
+	clear_bit(DTIM_EXPIRED, &vif->flags);
 
 	/* clear the LSB of the BitMapCtl field of the TIM IE */
-	ath6kl_wmi_set_pvb_cmd(ar->wmi, MCAST_AID, 0);
+	ath6kl_wmi_set_pvb_cmd(ar->wmi, vif->fw_vif_idx, MCAST_AID, 0);
 }
 
-void ath6kl_disconnect_event(struct ath6kl *ar, u8 reason, u8 *bssid,
+void ath6kl_disconnect_event(struct ath6kl_vif *vif, u8 reason, u8 *bssid,
 			     u8 assoc_resp_len, u8 *assoc_info,
 			     u16 prot_reason_status)
 {
-	struct bss *wmi_ssid_node = NULL;
-	unsigned long flags;
+	struct ath6kl *ar = vif->ar;
 
-	if (ar->nw_type == AP_NETWORK) {
+	if (vif->nw_type == AP_NETWORK) {
+		/* disconnect due to other STA vif switching channels */
+		if (reason == BSS_DISCONNECTED &&
+		    prot_reason_status == WMI_AP_REASON_STA_ROAM) {
+			ar->want_ch_switch |= 1 << vif->fw_vif_idx;
+			/* bail back to this channel if STA vif fails connect */
+			ar->last_ch = le16_to_cpu(vif->profile.ch);
+		}
+
+		if (prot_reason_status == WMI_AP_REASON_MAX_STA) {
+			/* send max client reached notification to user space */
+			cfg80211_conn_failed(vif->ndev, bssid,
+					     NL80211_CONN_FAIL_MAX_CLIENTS,
+					     GFP_KERNEL);
+		}
+
+		if (prot_reason_status == WMI_AP_REASON_ACL) {
+			/* send blocked client notification to user space */
+			cfg80211_conn_failed(vif->ndev, bssid,
+					     NL80211_CONN_FAIL_BLOCKED_CLIENT,
+					     GFP_KERNEL);
+		}
+
 		if (!ath6kl_remove_sta(ar, bssid, prot_reason_status))
 			return;
 
@@ -1180,28 +996,31 @@ void ath6kl_disconnect_event(struct ath6kl *ar, u8 reason, u8 *bssid,
 
 			/* clear the LSB of the TIM IE's BitMapCtl field */
 			if (test_bit(WMI_READY, &ar->flag))
-				ath6kl_wmi_set_pvb_cmd(ar->wmi, MCAST_AID, 0);
+				ath6kl_wmi_set_pvb_cmd(ar->wmi, vif->fw_vif_idx,
+						       MCAST_AID, 0);
 		}
 
 		if (!is_broadcast_ether_addr(bssid)) {
 			/* send event to application */
-			cfg80211_del_sta(ar->net_dev, bssid, GFP_KERNEL);
+			cfg80211_del_sta(vif->ndev, bssid, GFP_KERNEL);
 		}
 
-		clear_bit(CONNECTED, &ar->flag);
+		if (memcmp(vif->ndev->dev_addr, bssid, ETH_ALEN) == 0) {
+			memset(vif->wep_key_list, 0, sizeof(vif->wep_key_list));
+			clear_bit(CONNECTED, &vif->flags);
+		}
 		return;
 	}
 
-	ath6kl_cfg80211_disconnect_event(ar, reason, bssid,
-				       assoc_resp_len, assoc_info,
-				       prot_reason_status);
+	ath6kl_cfg80211_disconnect_event(vif, reason, bssid,
+					 assoc_resp_len, assoc_info,
+					 prot_reason_status);
 
-	aggr_reset_state(ar->aggr_cntxt);
+	aggr_reset_state(vif->aggr_cntxt->aggr_conn);
 
-	del_timer(&ar->disconnect_timer);
+	del_timer(&vif->disconnect_timer);
 
-	ath6kl_dbg(ATH6KL_DBG_WLAN_CONNECT,
-		   "disconnect reason is %d\n", reason);
+	ath6kl_dbg(ATH6KL_DBG_WLAN_CFG, "disconnect reason is %d\n", reason);
 
 	/*
 	 * If the event is due to disconnect cmd from the host, only they
@@ -1210,128 +1029,278 @@ void ath6kl_disconnect_event(struct ath6kl *ar, u8 reason, u8 *bssid,
 	 */
 	if (reason == DISCONNECT_CMD) {
 		if (!ar->usr_bss_filter && test_bit(WMI_READY, &ar->flag))
-			ath6kl_wmi_bssfilter_cmd(ar->wmi, NONE_BSS_FILTER, 0);
+			ath6kl_wmi_bssfilter_cmd(ar->wmi, vif->fw_vif_idx,
+						 NONE_BSS_FILTER, 0);
 	} else {
-		set_bit(CONNECT_PEND, &ar->flag);
+		set_bit(CONNECT_PEND, &vif->flags);
 		if (((reason == ASSOC_FAILED) &&
-		    (prot_reason_status == 0x11)) ||
-		    ((reason == ASSOC_FAILED) && (prot_reason_status == 0x0)
-		     && (ar->reconnect_flag == 1))) {
-			set_bit(CONNECTED, &ar->flag);
+		     (prot_reason_status == 0x11)) ||
+		    ((reason == ASSOC_FAILED) && (prot_reason_status == 0x0) &&
+		     (vif->reconnect_flag == 1))) {
+			set_bit(CONNECTED, &vif->flags);
 			return;
 		}
 	}
 
-	if ((reason == NO_NETWORK_AVAIL) && test_bit(WMI_READY, &ar->flag))  {
-		ath6kl_wmi_node_free(ar->wmi, bssid);
-
-		/*
-		 * In case any other same SSID nodes are present remove it,
-		 * since those nodes also not available now.
-		 */
-		do {
-			/*
-			 * Find the nodes based on SSID and remove it
-			 *
-			 * Note: This case will not work out for
-			 * Hidden-SSID
-			 */
-			wmi_ssid_node = ath6kl_wmi_find_ssid_node(ar->wmi,
-								  ar->ssid,
-								  ar->ssid_len,
-								  false,
-								  true);
-
-			if (wmi_ssid_node)
-				ath6kl_wmi_node_free(ar->wmi,
-						     wmi_ssid_node->ni_macaddr);
-
-		} while (wmi_ssid_node);
-	}
+	/* restart disconnected concurrent vifs waiting for new channel */
+	ath6kl_check_ch_switch(ar, ar->last_ch);
 
 	/* update connect & link status atomically */
-	spin_lock_irqsave(&ar->lock, flags);
-	clear_bit(CONNECTED, &ar->flag);
-	netif_carrier_off(ar->net_dev);
-	spin_unlock_irqrestore(&ar->lock, flags);
+	spin_lock_bh(&vif->if_lock);
+	clear_bit(CONNECTED, &vif->flags);
+	netif_carrier_off(vif->ndev);
+	spin_unlock_bh(&vif->if_lock);
 
-	if ((reason != CSERV_DISCONNECT) || (ar->reconnect_flag != 1))
-		ar->reconnect_flag = 0;
+	if ((reason != CSERV_DISCONNECT) || (vif->reconnect_flag != 1))
+		vif->reconnect_flag = 0;
 
 	if (reason != CSERV_DISCONNECT)
 		ar->user_key_ctrl = 0;
 
-	netif_stop_queue(ar->net_dev);
-	memset(ar->bssid, 0, sizeof(ar->bssid));
-	ar->bss_ch = 0;
+	netif_stop_queue(vif->ndev);
+	memset(vif->bssid, 0, sizeof(vif->bssid));
+	vif->bss_ch = 0;
 
 	ath6kl_tx_data_cleanup(ar);
 }
 
+struct ath6kl_vif *ath6kl_vif_first(struct ath6kl *ar)
+{
+	struct ath6kl_vif *vif;
+
+	spin_lock_bh(&ar->list_lock);
+	if (list_empty(&ar->vif_list)) {
+		spin_unlock_bh(&ar->list_lock);
+		return NULL;
+	}
+
+	vif = list_first_entry(&ar->vif_list, struct ath6kl_vif, list);
+
+	spin_unlock_bh(&ar->list_lock);
+
+	return vif;
+}
+
 static int ath6kl_open(struct net_device *dev)
 {
-	struct ath6kl *ar = ath6kl_priv(dev);
-	unsigned long flags;
+	struct ath6kl_vif *vif = netdev_priv(dev);
 
-	spin_lock_irqsave(&ar->lock, flags);
+	set_bit(WLAN_ENABLED, &vif->flags);
 
-	ar->wlan_state = WLAN_ENABLED;
-
-	if (test_bit(CONNECTED, &ar->flag)) {
+	if (test_bit(CONNECTED, &vif->flags)) {
 		netif_carrier_on(dev);
 		netif_wake_queue(dev);
 	} else
 		netif_carrier_off(dev);
-
-	spin_unlock_irqrestore(&ar->lock, flags);
 
 	return 0;
 }
 
 static int ath6kl_close(struct net_device *dev)
 {
-	struct ath6kl *ar = ath6kl_priv(dev);
+	struct ath6kl_vif *vif = netdev_priv(dev);
 
 	netif_stop_queue(dev);
 
-	ath6kl_disconnect(ar);
+	ath6kl_cfg80211_stop(vif);
 
-	if (test_bit(WMI_READY, &ar->flag)) {
-		if (ath6kl_wmi_scanparams_cmd(ar->wmi, 0xFFFF, 0, 0, 0, 0, 0, 0,
-					      0, 0, 0))
-			return -EIO;
-
-		ar->wlan_state = WLAN_DISABLED;
-	}
-
-	ath6kl_cfg80211_scan_complete_event(ar, -ECANCELED);
+	clear_bit(WLAN_ENABLED, &vif->flags);
 
 	return 0;
 }
 
 static struct net_device_stats *ath6kl_get_stats(struct net_device *dev)
 {
-	struct ath6kl *ar = ath6kl_priv(dev);
+	struct ath6kl_vif *vif = netdev_priv(dev);
 
-	return &ar->net_stats;
+	return &vif->net_stats;
 }
 
-static struct net_device_ops ath6kl_netdev_ops = {
+static int ath6kl_set_features(struct net_device *dev,
+			       netdev_features_t features)
+{
+	struct ath6kl_vif *vif = netdev_priv(dev);
+	struct ath6kl *ar = vif->ar;
+	int err = 0;
+
+	if ((features & NETIF_F_RXCSUM) &&
+	    (ar->rx_meta_ver != WMI_META_VERSION_2)) {
+		ar->rx_meta_ver = WMI_META_VERSION_2;
+		err = ath6kl_wmi_set_rx_frame_format_cmd(ar->wmi,
+							 vif->fw_vif_idx,
+							 ar->rx_meta_ver, 0, 0);
+		if (err) {
+			dev->features = features & ~NETIF_F_RXCSUM;
+			return err;
+		}
+	} else if (!(features & NETIF_F_RXCSUM) &&
+		   (ar->rx_meta_ver == WMI_META_VERSION_2)) {
+		ar->rx_meta_ver = 0;
+		err = ath6kl_wmi_set_rx_frame_format_cmd(ar->wmi,
+							 vif->fw_vif_idx,
+							 ar->rx_meta_ver, 0, 0);
+		if (err) {
+			dev->features = features | NETIF_F_RXCSUM;
+			return err;
+		}
+
+	}
+
+	return err;
+}
+
+static void ath6kl_set_multicast_list(struct net_device *ndev)
+{
+	struct ath6kl_vif *vif = netdev_priv(ndev);
+	bool mc_all_on = false;
+	int mc_count = netdev_mc_count(ndev);
+	struct netdev_hw_addr *ha;
+	bool found;
+	struct ath6kl_mc_filter *mc_filter, *tmp;
+	struct list_head mc_filter_new;
+	int ret;
+
+	if (!test_bit(WMI_READY, &vif->ar->flag) ||
+	    !test_bit(WLAN_ENABLED, &vif->flags))
+		return;
+
+	/* Enable multicast-all filter. */
+	mc_all_on = !!(ndev->flags & IFF_PROMISC) ||
+		    !!(ndev->flags & IFF_ALLMULTI) ||
+		    !!(mc_count > ATH6K_MAX_MC_FILTERS_PER_LIST);
+
+	if (mc_all_on)
+		set_bit(NETDEV_MCAST_ALL_ON, &vif->flags);
+	else
+		clear_bit(NETDEV_MCAST_ALL_ON, &vif->flags);
+
+	if (test_bit(ATH6KL_FW_CAPABILITY_WOW_MULTICAST_FILTER,
+		     vif->ar->fw_capabilities)) {
+		mc_all_on = mc_all_on || (vif->ar->state == ATH6KL_STATE_ON);
+	}
+
+	if (!(ndev->flags & IFF_MULTICAST)) {
+		mc_all_on = false;
+		set_bit(NETDEV_MCAST_ALL_OFF, &vif->flags);
+	} else {
+		clear_bit(NETDEV_MCAST_ALL_OFF, &vif->flags);
+	}
+
+	/* Enable/disable "multicast-all" filter*/
+	ath6kl_dbg(ATH6KL_DBG_TRC, "%s multicast-all filter\n",
+		   mc_all_on ? "enabling" : "disabling");
+
+	ret = ath6kl_wmi_mcast_filter_cmd(vif->ar->wmi, vif->fw_vif_idx,
+						  mc_all_on);
+	if (ret) {
+		ath6kl_warn("Failed to %s multicast-all receive\n",
+			    mc_all_on ? "enable" : "disable");
+		return;
+	}
+
+	if (test_bit(NETDEV_MCAST_ALL_ON, &vif->flags))
+		return;
+
+	/* Keep the driver and firmware mcast list in sync. */
+	list_for_each_entry_safe(mc_filter, tmp, &vif->mc_filter, list) {
+		found = false;
+		netdev_for_each_mc_addr(ha, ndev) {
+			if (memcmp(ha->addr, mc_filter->hw_addr,
+				   ATH6KL_MCAST_FILTER_MAC_ADDR_SIZE) == 0) {
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			/*
+			 * Delete the filter which was previously set
+			 * but not in the new request.
+			 */
+			ath6kl_dbg(ATH6KL_DBG_TRC,
+				   "Removing %pM from multicast filter\n",
+				   mc_filter->hw_addr);
+			ret = ath6kl_wmi_add_del_mcast_filter_cmd(vif->ar->wmi,
+					vif->fw_vif_idx, mc_filter->hw_addr,
+					false);
+			if (ret) {
+				ath6kl_warn("Failed to remove multicast filter:%pM\n",
+					    mc_filter->hw_addr);
+				return;
+			}
+
+			list_del(&mc_filter->list);
+			kfree(mc_filter);
+		}
+	}
+
+	INIT_LIST_HEAD(&mc_filter_new);
+
+	netdev_for_each_mc_addr(ha, ndev) {
+		found = false;
+		list_for_each_entry(mc_filter, &vif->mc_filter, list) {
+			if (memcmp(ha->addr, mc_filter->hw_addr,
+				   ATH6KL_MCAST_FILTER_MAC_ADDR_SIZE) == 0) {
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			mc_filter = kzalloc(sizeof(struct ath6kl_mc_filter),
+					    GFP_ATOMIC);
+			if (!mc_filter) {
+				WARN_ON(1);
+				goto out;
+			}
+
+			memcpy(mc_filter->hw_addr, ha->addr,
+			       ATH6KL_MCAST_FILTER_MAC_ADDR_SIZE);
+			/* Set the multicast filter */
+			ath6kl_dbg(ATH6KL_DBG_TRC,
+				   "Adding %pM to multicast filter list\n",
+				   mc_filter->hw_addr);
+			ret = ath6kl_wmi_add_del_mcast_filter_cmd(vif->ar->wmi,
+					vif->fw_vif_idx, mc_filter->hw_addr,
+					true);
+			if (ret) {
+				ath6kl_warn("Failed to add multicast filter :%pM\n",
+					    mc_filter->hw_addr);
+				kfree(mc_filter);
+				goto out;
+			}
+
+			list_add_tail(&mc_filter->list, &mc_filter_new);
+		}
+	}
+
+out:
+	list_splice_tail(&mc_filter_new, &vif->mc_filter);
+}
+
+static const struct net_device_ops ath6kl_netdev_ops = {
 	.ndo_open               = ath6kl_open,
 	.ndo_stop               = ath6kl_close,
 	.ndo_start_xmit         = ath6kl_data_tx,
 	.ndo_get_stats          = ath6kl_get_stats,
+	.ndo_set_features       = ath6kl_set_features,
+	.ndo_set_rx_mode	= ath6kl_set_multicast_list,
 };
 
 void init_netdev(struct net_device *dev)
 {
 	dev->netdev_ops = &ath6kl_netdev_ops;
+	dev->destructor = free_netdev;
 	dev->watchdog_timeo = ATH6KL_TX_TIMEOUT;
 
 	dev->needed_headroom = ETH_HLEN;
-	dev->needed_headroom += sizeof(struct ath6kl_llc_snap_hdr) +
-				sizeof(struct wmi_data_hdr) + HTC_HDR_LENGTH
-				+ WMI_MAX_TX_META_SZ;
+	dev->needed_headroom += roundup(sizeof(struct ath6kl_llc_snap_hdr) +
+					sizeof(struct wmi_data_hdr) +
+					HTC_HDR_LENGTH +
+					WMI_MAX_TX_META_SZ +
+					ATH6KL_HTC_ALIGN_BYTES, 4);
+
+	dev->hw_features |= NETIF_F_IP_CSUM | NETIF_F_RXCSUM;
 
 	return;
 }

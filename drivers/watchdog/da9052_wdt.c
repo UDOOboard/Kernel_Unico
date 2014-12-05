@@ -1,542 +1,246 @@
-#include <linux/miscdevice.h>
+/*
+ * System monitoring driver for DA9052 PMICs.
+ *
+ * Copyright(c) 2012 Dialog Semiconductor Ltd.
+ *
+ * Author: Anthony Olech <Anthony.Olech@diasemi.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ */
+
 #include <linux/module.h>
-#include <linux/moduleparam.h>
-#include <linux/fs.h>
 #include <linux/delay.h>
-#include <linux/timer.h>
 #include <linux/uaccess.h>
-#include <linux/jiffies.h>
 #include <linux/platform_device.h>
 #include <linux/time.h>
 #include <linux/watchdog.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-
+#include <linux/jiffies.h>
 
 #include <linux/mfd/da9052/reg.h>
 #include <linux/mfd/da9052/da9052.h>
-#include <linux/mfd/da9052/wdt.h>
 
-#define DRIVER_NAME "da9052-wdt"
+#define DA9052_DEF_TIMEOUT	4
+#define DA9052_TWDMIN		256
 
-#define	DA9052_STROBING_FILTER_ENABLE		0x0001
-#define	DA9052_STROBING_FILTER_DISABLE		0x0002
-#define	DA9052_SET_STROBING_MODE_MANUAL		0x0004
-#define	DA9052_SET_STROBING_MODE_AUTO		0x0008
-
-#define KERNEL_MODULE				0
-#define ENABLE					1
-#define DISABLE					0
-
-static u8 sm_strobe_filter_flag = DISABLE;
-static u8 sm_strobe_mode_flag = DA9052_STROBE_MANUAL;
-static u32 sm_mon_interval = DA9052_ADC_TWDMIN_TIME;
-static u8 sm_str_req = DISABLE;
-static u8 da9052_sm_scale = DA9052_WDT_DISABLE;
-module_param(sm_strobe_filter_flag,  byte, 0);
-MODULE_PARM_DESC(sm_strobe_filter_flag,
-		"DA9052 SM driver strobe filter flag default = DISABLE");
-
-module_param(sm_strobe_mode_flag, byte, 0);
-MODULE_PARM_DESC(sm_strobe_mode_flag,
-		"DA9052 SM driver watchdog strobing mode default\
-		= DA9052_STROBE_MANUAL");
-
-module_param(da9052_sm_scale, byte, 0);
-MODULE_PARM_DESC(da9052_sm_scale,
-		"DA9052 SM driver scaling value used to calculate the\
-		time for the strobing  filter default = 0");
-
-module_param(sm_str_req, byte, 0);
-MODULE_PARM_DESC(sm_str_req,
-		"DA9052 SM driver strobe request flag default = DISABLE");
-
-static int nowayout = WATCHDOG_NOWAYOUT;
-module_param(nowayout, int, 0);
-MODULE_PARM_DESC(nowayout,
-		"Watchdog cannot be stopped once started (default="
-		__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
-
-static struct timer_list *monitoring_timer;
-
-struct da9052_wdt {
-	struct platform_device *pdev;
+struct da9052_wdt_data {
+	struct watchdog_device wdt;
 	struct da9052 *da9052;
+	struct kref kref;
+	unsigned long jpast;
 };
-static struct miscdevice da9052_wdt_miscdev;
-static unsigned long da9052_wdt_users;
-static int da9052_wdt_expect_close;
 
-static struct da9052_wdt *get_wdt_da9052(void)
+static const struct {
+	u8 reg_val;
+	int time;  /* Seconds */
+} da9052_wdt_maps[] = {
+	{ 1, 2 },
+	{ 2, 4 },
+	{ 3, 8 },
+	{ 4, 16 },
+	{ 5, 32 },
+	{ 5, 33 },  /* Actual time  32.768s so included both 32s and 33s */
+	{ 6, 65 },
+	{ 6, 66 },  /* Actual time 65.536s so include both, 65s and 66s */
+	{ 7, 131 },
+};
+
+
+static void da9052_wdt_release_resources(struct kref *r)
 {
-	/*return dev_get_drvdata(da9052_wdt_miscdev.parent);*/
-	return platform_get_drvdata
-			(to_platform_device(da9052_wdt_miscdev.parent));
 }
 
-void start_strobing(struct work_struct *work)
+static int da9052_wdt_set_timeout(struct watchdog_device *wdt_dev,
+				  unsigned int timeout)
 {
-	struct da9052_ssc_msg msg;
-	int ret;
-	struct da9052_wdt *wdt = get_wdt_da9052();
+	struct da9052_wdt_data *driver_data = watchdog_get_drvdata(wdt_dev);
+	struct da9052 *da9052 = driver_data->da9052;
+	int ret, i;
 
-
-	if (NULL == wdt) {
-		mod_timer(monitoring_timer, jiffies + sm_mon_interval);
-		return;
-	}
-	msg.addr = DA9052_CONTROLD_REG;
-	msg.data = 0;
-	da9052_lock(wdt->da9052);
-	ret = wdt->da9052->read(wdt->da9052, &msg);
-	if (ret) {
-		da9052_unlock(wdt->da9052);
-		return;
-	}
-	da9052_unlock(wdt->da9052);
-
-	msg.data = (msg.data | DA9052_CONTROLD_WATCHDOG);
-	da9052_lock(wdt->da9052);
-	ret = wdt->da9052->write(wdt->da9052, &msg);
-	if (ret) {
-		da9052_unlock(wdt->da9052);
-		return;
-	}
-	da9052_unlock(wdt->da9052);
-
-	sm_str_req = DISABLE;
-
-	mod_timer(monitoring_timer, jiffies + sm_mon_interval);
-	return;
-}
-
-
-void timer_callback(void)
-{
-	if (((sm_strobe_mode_flag) &&
-		(sm_strobe_mode_flag == DA9052_STROBE_MANUAL)) ||
-		(sm_strobe_mode_flag == DA9052_STROBE_AUTO)) {
-		schedule_work(&strobing_action);
-	} else {
-		if (sm_strobe_mode_flag == DA9052_STROBE_MANUAL) {
-			mod_timer(monitoring_timer, jiffies +
-			sm_mon_interval);
-		}
-	}
-}
-
-static int da9052_sm_hw_init(struct da9052_wdt *wdt)
-{
-	/* Create timer structure */
-	monitoring_timer = kzalloc(sizeof(struct timer_list), GFP_KERNEL);
-	if (!monitoring_timer)
-		return -ENOMEM;
-
-	init_timer(monitoring_timer);
-	monitoring_timer->expires = jiffies + sm_mon_interval;
-	monitoring_timer->function = (void *)&timer_callback;
-
-	sm_strobe_filter_flag = DA9052_SM_STROBE_CONF;
-	sm_strobe_mode_flag = DA9052_STROBE_MANUAL;
-
-	return 0;
-}
-
-static int da9052_sm_hw_deinit(struct da9052_wdt *wdt)
-{
-	struct da9052_ssc_msg msg;
-	int ret;
-
-	if (monitoring_timer != NULL)
-		del_timer(monitoring_timer);
-	kfree(monitoring_timer);
-
-	msg.addr = DA9052_CONTROLD_REG;
-	msg.data = 0;
-
-	da9052_lock(wdt->da9052);
-	ret = wdt->da9052->read(wdt->da9052, &msg);
-	if (ret)
-		goto ssc_err;
-	da9052_unlock(wdt->da9052);
-
-	msg.data = (msg.data & ~(DA9052_CONTROLD_TWDSCALE));
-	da9052_lock(wdt->da9052);
-	ret = wdt->da9052->write(wdt->da9052, &msg);
-	if (ret)
-		goto ssc_err;
-	da9052_unlock(wdt->da9052);
-
-	return 0;
-ssc_err:
-	da9052_unlock(wdt->da9052);
-	return -EIO;
-}
-
- s32 da9052_sm_set_strobing_filter(struct da9052_wdt *wdt,
-				u8 strobing_filter_state)
- {
-	struct da9052_ssc_msg msg;
-	int ret = 0;
-
-	msg.addr = DA9052_CONTROLD_REG;
-	msg.data = 0;
-	da9052_lock(wdt->da9052);
-	ret = wdt->da9052->read(wdt->da9052, &msg);
-	if (ret)
-		goto ssc_err;
-	da9052_unlock(wdt->da9052);
-
-	msg.data = (msg.data & DA9052_CONTROLD_TWDSCALE);
-
-	if (strobing_filter_state == ENABLE) {
-		sm_strobe_filter_flag = ENABLE;
-		if (DA9052_WDT_DISABLE == msg.data) {
-			sm_str_req = DISABLE;
-			del_timer(monitoring_timer);
-			return 0;
-		}
-		if (DA9052_SCALE_64X == msg.data)
-			sm_mon_interval = msecs_to_jiffies(DA9052_X64_WINDOW);
-		else if (DA9052_SCALE_32X == msg.data)
-			sm_mon_interval = msecs_to_jiffies(DA9052_X32_WINDOW);
-		else if (DA9052_SCALE_16X == msg.data)
-			sm_mon_interval = msecs_to_jiffies(DA9052_X16_WINDOW);
-		else if (DA9052_SCALE_8X == msg.data)
-			sm_mon_interval = msecs_to_jiffies(DA9052_X8_WINDOW);
-		else if (DA9052_SCALE_4X == msg.data)
-			sm_mon_interval = msecs_to_jiffies(DA9052_X4_WINDOW);
-		else if (DA9052_SCALE_2X == msg.data)
-			sm_mon_interval = msecs_to_jiffies(DA9052_X2_WINDOW);
-		else
-			sm_mon_interval = msecs_to_jiffies(DA9052_X1_WINDOW);
-
-	} else if (strobing_filter_state == DISABLE) {
-		sm_strobe_filter_flag = DISABLE;
-		sm_mon_interval = msecs_to_jiffies(DA9052_ADC_TWDMIN_TIME);
-		if (DA9052_WDT_DISABLE == msg.data) {
-			sm_str_req = DISABLE;
-			del_timer(monitoring_timer);
-			return 0;
-		}
-	} else {
-		return STROBING_FILTER_ERROR;
-	}
-	mod_timer(monitoring_timer, jiffies + sm_mon_interval);
-
-	return 0;
-ssc_err:
-	da9052_unlock(wdt->da9052);
-	return -EIO;
-}
-
-int da9052_sm_set_strobing_mode(u8 strobing_mode_state)
-{
-	if (strobing_mode_state == DA9052_STROBE_AUTO)
-		sm_strobe_mode_flag = DA9052_STROBE_AUTO;
-	else if (strobing_mode_state == DA9052_STROBE_MANUAL)
-		sm_strobe_mode_flag = DA9052_STROBE_MANUAL;
-	else
-		return STROBING_MODE_ERROR;
-
-		return 0;
-}
-
-int da9052_sm_strobe_wdt(void)
-{
-	sm_str_req = ENABLE;
-	return 0;
-}
-
- s32 da9052_sm_set_wdt(struct da9052_wdt *wdt, u8 wdt_scaling)
-{
-	struct da9052_ssc_msg msg;
-	int ret = 0;
-
-
-	if (wdt_scaling > DA9052_SCALE_64X)
-		return INVALID_SCALING_VALUE;
-
-	msg.addr = DA9052_CONTROLD_REG;
-	msg.data = 0;
-	da9052_lock(wdt->da9052);
-	ret = wdt->da9052->read(wdt->da9052, &msg);
-	if (ret)
-		goto ssc_err;
-	da9052_unlock(wdt->da9052);
-
-	if (!((DA9052_WDT_DISABLE == (msg.data & DA9052_CONTROLD_TWDSCALE)) &&
-	    (DA9052_WDT_DISABLE == wdt_scaling))) {
-		msg.data = (msg.data & ~(DA9052_CONTROLD_TWDSCALE));
-		msg.addr = DA9052_CONTROLD_REG;
-
-
-		da9052_lock(wdt->da9052);
-		ret = wdt->da9052->write(wdt->da9052, &msg);
-		if (ret)
-			goto ssc_err;
-		da9052_unlock(wdt->da9052);
-
-		msleep(1);
-		da9052_lock(wdt->da9052);
-		ret = wdt->da9052->read(wdt->da9052, &msg);
-		if (ret)
-			goto ssc_err;
-		da9052_unlock(wdt->da9052);
-
-
-		msg.data |= wdt_scaling;
-
-		da9052_lock(wdt->da9052);
-		ret = wdt->da9052->write(wdt->da9052, &msg);
-		if (ret)
-			goto ssc_err;
-		da9052_unlock(wdt->da9052);
-
-		sm_str_req = DISABLE;
-		if (DA9052_WDT_DISABLE == wdt_scaling) {
-			del_timer(monitoring_timer);
-			return 0;
-		}
-		if (sm_strobe_filter_flag == ENABLE) {
-			if (DA9052_SCALE_64X == wdt_scaling) {
-				sm_mon_interval =
-					msecs_to_jiffies(DA9052_X64_WINDOW);
-			} else if (DA9052_SCALE_32X == wdt_scaling) {
-				sm_mon_interval =
-					msecs_to_jiffies(DA9052_X32_WINDOW);
-			} else if (DA9052_SCALE_16X == wdt_scaling) {
-				sm_mon_interval =
-					msecs_to_jiffies(DA9052_X16_WINDOW);
-			} else if (DA9052_SCALE_8X == wdt_scaling) {
-				sm_mon_interval =
-					msecs_to_jiffies(DA9052_X8_WINDOW);
-			} else if (DA9052_SCALE_4X == wdt_scaling) {
-				sm_mon_interval =
-					msecs_to_jiffies(DA9052_X4_WINDOW);
-			} else if (DA9052_SCALE_2X == wdt_scaling) {
-				sm_mon_interval =
-					msecs_to_jiffies(DA9052_X2_WINDOW);
-			} else {
-				sm_mon_interval =
-					msecs_to_jiffies(DA9052_X1_WINDOW);
-			}
-		} else {
-			sm_mon_interval = msecs_to_jiffies(
-						DA9052_ADC_TWDMIN_TIME);
-		}
-		mod_timer(monitoring_timer, jiffies + sm_mon_interval);
-	}
-
-	return 0;
-ssc_err:
-	da9052_unlock(wdt->da9052);
-	return -EIO;
-}
-
-static int da9052_wdt_open(struct inode *inode, struct file *file)
-{
-	struct da9052_wdt *wdt = get_wdt_da9052();
-	int ret;
-	printk(KERN_INFO"IN WDT OPEN \n");
-
-	if (!wdt) {
-		printk(KERN_INFO"Returning no device\n");
-		return -ENODEV;
-	}
-	printk(KERN_INFO"IN WDT OPEN 1\n");
-
-	if (test_and_set_bit(0, &da9052_wdt_users))
-		return -EBUSY;
-
-	ret = da9052_sm_hw_init(wdt);
-	if (ret != 0) {
-		printk(KERN_ERR "Watchdog hw init failed\n");
+	/*
+	 * Disable the Watchdog timer before setting
+	 * new time out.
+	 */
+	ret = da9052_reg_update(da9052, DA9052_CONTROL_D_REG,
+				DA9052_CONTROLD_TWDSCALE, 0);
+	if (ret < 0) {
+		dev_err(da9052->dev, "Failed to disable watchdog bit, %d\n",
+			ret);
 		return ret;
 	}
+	if (timeout) {
+		/*
+		 * To change the timeout, da9052 needs to
+		 * be disabled for at least 150 us.
+		 */
+		udelay(150);
 
-	return nonseekable_open(inode, file);
-}
+		/* Set the desired timeout */
+		for (i = 0; i < ARRAY_SIZE(da9052_wdt_maps); i++)
+			if (da9052_wdt_maps[i].time == timeout)
+				break;
 
-static int da9052_wdt_release(struct inode *inode, struct file *file)
-{
-	struct da9052_wdt *wdt = get_wdt_da9052();
+		if (i == ARRAY_SIZE(da9052_wdt_maps))
+			ret = -EINVAL;
+		else
+			ret = da9052_reg_update(da9052, DA9052_CONTROL_D_REG,
+						DA9052_CONTROLD_TWDSCALE,
+						da9052_wdt_maps[i].reg_val);
+		if (ret < 0) {
+			dev_err(da9052->dev,
+				"Failed to update timescale bit, %d\n", ret);
+			return ret;
+		}
 
-	if (da9052_wdt_expect_close == 42)
-		da9052_sm_hw_deinit(wdt);
-	else
-		da9052_sm_strobe_wdt();
-	da9052_wdt_expect_close = 0;
-	clear_bit(0, &da9052_wdt_users);
+		wdt_dev->timeout = timeout;
+		driver_data->jpast = jiffies;
+	}
+
 	return 0;
 }
 
-static ssize_t da9052_wdt_write(struct file *file,
-				const char __user *data, size_t count,
-				loff_t *ppos)
+static void da9052_wdt_ref(struct watchdog_device *wdt_dev)
 {
-	size_t i;
+	struct da9052_wdt_data *driver_data = watchdog_get_drvdata(wdt_dev);
 
-	if (count) {
-		if (!nowayout) {
-			/* In case it was set long ago */
-			da9052_wdt_expect_close = 0;
-			for (i = 0; i != count; i++) {
-				char c;
-				if (get_user(c, data + i))
-					return -EFAULT;
-				if (c == 'V')
-					da9052_wdt_expect_close = 42;
-			}
-		}
-		da9052_sm_strobe_wdt();
-	}
-	return count;
+	kref_get(&driver_data->kref);
+}
+
+static void da9052_wdt_unref(struct watchdog_device *wdt_dev)
+{
+	struct da9052_wdt_data *driver_data = watchdog_get_drvdata(wdt_dev);
+
+	kref_put(&driver_data->kref, da9052_wdt_release_resources);
+}
+
+static int da9052_wdt_start(struct watchdog_device *wdt_dev)
+{
+	return da9052_wdt_set_timeout(wdt_dev, wdt_dev->timeout);
+}
+
+static int da9052_wdt_stop(struct watchdog_device *wdt_dev)
+{
+	return da9052_wdt_set_timeout(wdt_dev, 0);
+}
+
+static int da9052_wdt_ping(struct watchdog_device *wdt_dev)
+{
+	struct da9052_wdt_data *driver_data = watchdog_get_drvdata(wdt_dev);
+	struct da9052 *da9052 = driver_data->da9052;
+	unsigned long msec, jnow = jiffies;
+	int ret;
+
+	/*
+	 * We have a minimum time for watchdog window called TWDMIN. A write
+	 * to the watchdog before this elapsed time should cause an error.
+	 */
+	msec = (jnow - driver_data->jpast) * 1000/HZ;
+	if (msec < DA9052_TWDMIN)
+		mdelay(msec);
+
+	/* Reset the watchdog timer */
+	ret = da9052_reg_update(da9052, DA9052_CONTROL_D_REG,
+				DA9052_CONTROLD_WATCHDOG, 1 << 7);
+	if (ret < 0)
+		goto err_strobe;
+
+	/*
+	 * FIXME: Reset the watchdog core, in general PMIC
+	 * is supposed to do this
+	 */
+	ret = da9052_reg_update(da9052, DA9052_CONTROL_D_REG,
+				DA9052_CONTROLD_WATCHDOG, 0 << 7);
+err_strobe:
+	return ret;
 }
 
 static struct watchdog_info da9052_wdt_info = {
 	.options	= WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING,
-	.identity	= "DA9052_SM Watchdog",
+	.identity	= "DA9052 Watchdog",
 };
 
-static long da9052_wdt_ioctl(struct file *file, unsigned int cmd,
-				unsigned long arg)
+static const struct watchdog_ops da9052_wdt_ops = {
+	.owner = THIS_MODULE,
+	.start = da9052_wdt_start,
+	.stop = da9052_wdt_stop,
+	.ping = da9052_wdt_ping,
+	.set_timeout = da9052_wdt_set_timeout,
+	.ref = da9052_wdt_ref,
+	.unref = da9052_wdt_unref,
+};
+
+
+static int da9052_wdt_probe(struct platform_device *pdev)
 {
-	struct da9052_wdt *wdt = get_wdt_da9052();
-	void __user *argp = (void __user *)arg;
-	int __user *p = argp;
-	unsigned char new_value;
-
-	switch (cmd) {
-
-	case WDIOC_GETSUPPORT:
-		return copy_to_user(argp, &da9052_wdt_info,
-			sizeof(da9052_wdt_info)) ? -EFAULT : 0;
-	case WDIOC_GETSTATUS:
-	case WDIOC_GETBOOTSTATUS:
-		return put_user(0, p);
-	case WDIOC_SETOPTIONS:
-		if (get_user(new_value, p))
-			return -EFAULT;
-		if (new_value & DA9052_STROBING_FILTER_ENABLE)
-			da9052_sm_set_strobing_filter(wdt, ENABLE);
-		if (new_value & DA9052_STROBING_FILTER_DISABLE)
-			da9052_sm_set_strobing_filter(wdt, DISABLE);
-		if (new_value & DA9052_SET_STROBING_MODE_MANUAL)
-			da9052_sm_set_strobing_mode(DA9052_STROBE_MANUAL);
-		if (new_value & DA9052_SET_STROBING_MODE_AUTO)
-			da9052_sm_set_strobing_mode(DA9052_STROBE_AUTO);
-		return 0;
-	case WDIOC_KEEPALIVE:
-		if (da9052_sm_strobe_wdt())
-			return -EFAULT;
-		else
-			return 0;
-	case WDIOC_SETTIMEOUT:
-		if (get_user(new_value, p))
-			return -EFAULT;
-		da9052_sm_scale = new_value;
-		if (da9052_sm_set_wdt(wdt, da9052_sm_scale))
-			return -EFAULT;
-	case WDIOC_GETTIMEOUT:
-		return put_user(sm_mon_interval, p);
-	default:
-		return -ENOTTY;
-	}
-	return 0;
-}
-
-static const struct file_operations da9052_wdt_fops = {
-	.owner          = THIS_MODULE,
-	.llseek		= no_llseek,
-	.unlocked_ioctl	= da9052_wdt_ioctl,
-	.write		= da9052_wdt_write,
-	.open           = da9052_wdt_open,
-	.release        = da9052_wdt_release,
-};
-
-static struct miscdevice da9052_wdt_miscdev = {
-	.minor		= 255,
-	.name		= "da9052-wdt",
-	.fops		= &da9052_wdt_fops,
-};
-
-static int __devinit da9052_sm_probe(struct platform_device *pdev)
-{
+	struct da9052 *da9052 = dev_get_drvdata(pdev->dev.parent);
+	struct da9052_wdt_data *driver_data;
+	struct watchdog_device *da9052_wdt;
 	int ret;
-	struct da9052_wdt *wdt;
-	struct da9052_ssc_msg msg;
 
-	wdt = kzalloc(sizeof(*wdt), GFP_KERNEL);
-	if (!wdt)
-		return -ENOMEM;
-
-	wdt->da9052 = dev_get_drvdata(pdev->dev.parent);
-	platform_set_drvdata(pdev, wdt);
-
-	msg.addr = DA9052_CONTROLD_REG;
-	msg.data = 0;
-
-	da9052_lock(wdt->da9052);
-	ret = wdt->da9052->read(wdt->da9052, &msg);
-	if (ret) {
-		da9052_unlock(wdt->da9052);
-		goto err_ssc_comm;
+	driver_data = devm_kzalloc(&pdev->dev, sizeof(*driver_data),
+				   GFP_KERNEL);
+	if (!driver_data) {
+		dev_err(da9052->dev, "Unable to alloacate watchdog device\n");
+		ret = -ENOMEM;
+		goto err;
 	}
-	printk(KERN_INFO"DA9052 SM probe - 0 \n");
+	driver_data->da9052 = da9052;
 
-	msg.data = (msg.data & ~(DA9052_CONTROLD_TWDSCALE));
-	ret = wdt->da9052->write(wdt->da9052, &msg);
-	if (ret) {
-		da9052_unlock(wdt->da9052);
-		goto err_ssc_comm;
+	da9052_wdt = &driver_data->wdt;
+
+	da9052_wdt->timeout = DA9052_DEF_TIMEOUT;
+	da9052_wdt->info = &da9052_wdt_info;
+	da9052_wdt->ops = &da9052_wdt_ops;
+	watchdog_set_drvdata(da9052_wdt, driver_data);
+
+	kref_init(&driver_data->kref);
+
+	ret = da9052_reg_update(da9052, DA9052_CONTROL_D_REG,
+				DA9052_CONTROLD_TWDSCALE, 0);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to disable watchdog bits, %d\n",
+			ret);
+		goto err;
 	}
-	da9052_unlock(wdt->da9052);
 
-	da9052_wdt_miscdev.parent = &pdev->dev;
-
-	ret = misc_register(&da9052_wdt_miscdev);
+	ret = watchdog_register_device(&driver_data->wdt);
 	if (ret != 0) {
-		platform_set_drvdata(pdev, NULL);
-		kfree(wdt);
-		return -EFAULT;
+		dev_err(da9052->dev, "watchdog_register_device() failed: %d\n",
+			ret);
+		goto err;
 	}
-	return 0;
-err_ssc_comm:
-	platform_set_drvdata(pdev, NULL);
-	kfree(wdt);
-	return -EIO;
+
+	dev_set_drvdata(&pdev->dev, driver_data);
+err:
+	return ret;
 }
 
-static int __devexit da9052_sm_remove(struct platform_device *dev)
+static int da9052_wdt_remove(struct platform_device *pdev)
 {
-	misc_deregister(&da9052_wdt_miscdev);
+	struct da9052_wdt_data *driver_data = dev_get_drvdata(&pdev->dev);
+
+	watchdog_unregister_device(&driver_data->wdt);
+	kref_put(&driver_data->kref, da9052_wdt_release_resources);
 
 	return 0;
 }
 
-static struct platform_driver da9052_sm_driver = {
-	.probe		= da9052_sm_probe,
-	.remove		= __devexit_p(da9052_sm_remove),
-	.driver		= {
-		.name	= DRIVER_NAME,
-		.owner	= THIS_MODULE,
+static struct platform_driver da9052_wdt_driver = {
+	.probe = da9052_wdt_probe,
+	.remove = da9052_wdt_remove,
+	.driver = {
+		.name	= "da9052-watchdog",
 	},
 };
 
-static int __init da9052_sm_init(void)
-{
-	return platform_driver_register(&da9052_sm_driver);
-}
-module_init(da9052_sm_init);
+module_platform_driver(da9052_wdt_driver);
 
-static void __exit da9052_sm_exit(void)
-{
-	platform_driver_unregister(&da9052_sm_driver);
-}
-module_exit(da9052_sm_exit);
-
-MODULE_AUTHOR("David Dajun Chen <dchen@diasemi.com>")
+MODULE_AUTHOR("Anthony Olech <Anthony.Olech@diasemi.com>");
 MODULE_DESCRIPTION("DA9052 SM Device Driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:" DRIVER_NAME);
+MODULE_ALIAS("platform:da9052-watchdog");

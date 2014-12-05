@@ -2,16 +2,19 @@
  * CAAM control-plane driver backend
  * Controller-level driver, kernel property detection, initialization
  *
- * Copyright (C) 2008-2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2008-2013 Freescale Semiconductor, Inc.
  */
 
 #include "compat.h"
 #include "regs.h"
-#include "snvsregs.h"
 #include "intern.h"
 #include "jr.h"
 #include "desc_constr.h"
 #include "error.h"
+#include "ctrl.h"
+
+/* Used to capture the array of job rings */
+struct device **caam_jr_dev;
 
 static int caam_remove(struct platform_device *pdev)
 {
@@ -25,28 +28,6 @@ static int caam_remove(struct platform_device *pdev)
 	ctrlpriv = dev_get_drvdata(ctrldev);
 	topregs = (struct caam_full __iomem *)ctrlpriv->ctrl;
 
-#ifndef CONFIG_OF
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_SECVIO
-	caam_secvio_shutdown(pdev);
-#endif /* SECVIO */
-
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_SM
-	caam_sm_shutdown(pdev);
-#endif
-
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_RNG_API
-	if (ctrlpriv->rng_inst)
-		caam_rng_shutdown();
-#endif
-
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_AHASH_API
-	caam_algapi_hash_shutdown(pdev);
-#endif
-
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API
-	caam_algapi_shutdown(pdev);
-#endif
-#endif
 	/* shut down JobRs */
 	for (ring = 0; ring < ctrlpriv->total_jobrs; ring++) {
 		ret |= caam_jr_shutdown(ctrlpriv->jrdev[ring]);
@@ -59,15 +40,15 @@ static int caam_remove(struct platform_device *pdev)
 	debugfs_remove_recursive(ctrlpriv->dfs_root);
 #endif
 
-	/* Unmap SNVS and Secure Memory */
-	iounmap(ctrlpriv->snvs);
-	iounmap(ctrlpriv->sm_base);
-
 	/* Unmap controller region */
 	iounmap(&topregs->ctrl);
 
+#ifdef CONFIG_ARM
 	/* shut clocks off before finalizing shutdown */
-	clk_disable(ctrlpriv->caam_clk);
+	clk_disable(ctrlpriv->caam_ipg);
+	clk_disable(ctrlpriv->caam_mem);
+	clk_disable(ctrlpriv->caam_aclk);
+#endif
 
 	kfree(ctrlpriv->jrdev);
 	kfree(ctrlpriv);
@@ -95,7 +76,7 @@ static void build_instantiation_desc(u32 *desc)
 
 	/*
 	 * load 1 to clear written reg:
-	 * resets the done interrrupt and returns the RNG to idle.
+	 * resets the done interrupt and returns the RNG to idle.
 	 */
 	append_load_imm_u32(desc, 1, LDST_SRCDST_WORD_CLRW);
 
@@ -143,7 +124,6 @@ static int instantiate_rng(struct device *jrdev)
 	dma_sync_single_for_device(jrdev, desc_dma, desc_bytes(desc),
 				   DMA_TO_DEVICE);
 	init_completion(&instantiation.completion);
-
 	ret = caam_jr_enqueue(jrdev, desc, rng4_init_done, &instantiation);
 	if (!ret) {
 		wait_for_completion_interruptible(&instantiation.completion);
@@ -178,9 +158,8 @@ static void kick_trng(struct platform_device *pdev)
 	setbits32(&r4tst->rtmctl, RTMCTL_PRGM);
 	/* Set clocks per sample to the default, and divider to zero */
 	val = rd_reg32(&r4tst->rtsdctl);
-	val = ((val & ~RTSDCTL_ENT_DLY_MASK) |
-	       (RNG4_ENT_CLOCKS_SAMPLE << RTSDCTL_ENT_DLY_SHIFT)) &
-	       ~RTMCTL_OSC_DIV_MASK;
+	val = (val & ~RTSDCTL_ENT_DLY_MASK) |
+	       (RNG4_ENT_CLOCKS_SAMPLE << RTSDCTL_ENT_DLY_SHIFT);
 	wr_reg32(&r4tst->rtsdctl, val);
 	/* min. freq. count */
 	wr_reg32(&r4tst->rtfrqmin, RNG4_ENT_CLOCKS_SAMPLE / 4);
@@ -190,29 +169,76 @@ static void kick_trng(struct platform_device *pdev)
 	clrbits32(&r4tst->rtmctl, RTMCTL_PRGM);
 }
 
+/**
+ * caam_get_era() - Return the ERA of the SEC on SoC, based
+ * on the SEC_VID register.
+ * Returns the ERA number (1..4) or -ENOTSUPP if the ERA is unknown.
+ * @caam_id - the value of the SEC_VID register
+ **/
+int caam_get_era(u64 caam_id)
+{
+	struct sec_vid *sec_vid = (struct sec_vid *)&caam_id;
+	static const struct {
+		u16 ip_id;
+		u8 maj_rev;
+		u8 era;
+	} caam_eras[] = {
+		{0x0A10, 1, 1},
+		{0x0A10, 2, 2},
+		{0x0A12, 1, 3},
+		{0x0A14, 1, 3},
+		{0x0A14, 2, 4},
+		{0x0A16, 1, 4},
+		{0x0A11, 1, 4},
+		{0x0A10, 3, 4},
+		{0x0A18, 1, 4},
+		{0x0A11, 2, 5},
+		{0x0A12, 2, 5},
+		{0x0A13, 1, 5},
+		{0x0A1C, 1, 5},
+		{0x0A12, 4, 6},
+		{0x0A13, 2, 6},
+		{0x0A16, 2, 6},
+		{0x0A18, 2, 6},
+		{0x0A1A, 1, 6},
+		{0x0A1C, 2, 6},
+		{0x0A17, 1, 6}
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(caam_eras); i++)
+		if (caam_eras[i].ip_id == sec_vid->ip_id &&
+			caam_eras[i].maj_rev == sec_vid->maj_rev)
+				return caam_eras[i].era;
+
+	return -ENOTSUPP;
+}
+EXPORT_SYMBOL(caam_get_era);
+
+/*
+ * Return a job ring device.  This is available so outside
+ * entities can gain direct access to the job ring.  For now,
+ * this function returns the first job ring (at index 0).
+ */
+struct device *caam_get_jrdev(void)
+{
+	return caam_jr_dev[0];
+}
+EXPORT_SYMBOL(caam_get_jrdev);
+
+
 /* Probe routine for CAAM top (controller) level */
 static int caam_probe(struct platform_device *pdev)
 {
-	int d, ring, rspec, status;
+	int ret, ring, rspec;
+	u64 caam_id;
 	struct device *dev;
-	struct device_node *np;
+	struct device_node *nprop, *np;
 	struct caam_ctrl __iomem *ctrl;
 	struct caam_full __iomem *topregs;
-	struct snvs_full __iomem *snvsregs;
-	void __iomem *sm_base;
 	struct caam_drv_private *ctrlpriv;
-	u32 deconum;
 #ifdef CONFIG_DEBUG_FS
 	struct caam_perfmon *perfmon;
-#endif
-#ifdef CONFIG_OF
-	struct device_node *nprop;
-#else
-	struct resource *res;
-	char *rname, inst;
-#endif
-#ifdef CONFIG_ARM
-	int ret = 0;
 #endif
 
 	ctrlpriv = kzalloc(sizeof(struct caam_drv_private), GFP_KERNEL);
@@ -222,125 +248,93 @@ static int caam_probe(struct platform_device *pdev)
 	dev = &pdev->dev;
 	dev_set_drvdata(dev, ctrlpriv);
 	ctrlpriv->pdev = pdev;
+	nprop = pdev->dev.of_node;
 
 	/* Get configuration properties from device tree */
 	/* First, get register page */
-#ifdef CONFIG_OF
-	nprop = pdev->dev.of_node;
 	ctrl = of_iomap(nprop, 0);
 	if (ctrl == NULL) {
 		dev_err(dev, "caam: of_iomap() failed\n");
 		return -ENOMEM;
 	}
-#else
-	/* Get the named resource for the controller base address */
-	res = platform_get_resource_byname(pdev,
-		IORESOURCE_MEM, "iobase_caam");
-	if (!res) {
-		dev_err(dev, "caam: invalid address resource type\n");
-		return -ENODEV;
-	}
-	ctrl = ioremap(res->start, SZ_64K);
-	if (ctrl == NULL) {
-		dev_err(dev, "caam: ioremap() failed\n");
-		return -ENOMEM;
-	}
-#endif
-
 	ctrlpriv->ctrl = (struct caam_ctrl __force *)ctrl;
 
 	/* topregs used to derive pointers to CAAM sub-blocks only */
 	topregs = (struct caam_full __iomem *)ctrl;
 
-	/*
-	 * Next, map SNVS register page
-	 * FIXME: MX6 has a separate RTC driver using SNVS. This driver
-	 * will have a mapped pointer to SNVS registers also, which poses
-	 * a conflict if we're not very careful to stay away from registers
-	 * and interrupts that it uses. In the future, pieces of that driver
-	 * may need to migrate down here. In the meantime, use caution with
-	 * this pointer. Also note that the snvs-rtc driver probably controls
-	 * SNVS device clocks.
-	 */
-#ifdef CONFIG_OF
-	/* Get SNVS register page */
-#else
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "iobase_snvs");
-	if (!res) {
-		dev_err(dev, "snvs: invalid address resource type\n");
-		return -ENODEV;
-	}
-	snvsregs = ioremap(res->start, res->end - res->start + 1);
-	if (snvsregs == NULL) {
-		dev_err(dev, "snvs: ioremap() failed\n");
-		iounmap(ctrl);
-		return -ENOMEM;
-	}
-#endif
-	ctrlpriv->snvs = (struct snvs_full __force *)snvsregs;
-
-	/* Now map CAAM-Secure Memory Space */
-#ifdef CONFIG_OF
-	/* Get CAAM-SM node and of_iomap() and save */
-#else
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-					   "iobase_caam_sm");
-	if (!res) {
-		dev_err(dev, "caam_sm: invalid address resource type\n");
-		return -ENODEV;
-	}
-	sm_base = ioremap_nocache(res->start, res->end - res->start + 1);
-	if (sm_base == NULL) {
-		dev_err(dev, "caam_sm: ioremap_nocache() failed\n");
-		iounmap(ctrl);
-		iounmap(snvsregs);
-		return -ENOMEM;
-	}
-#endif
-	ctrlpriv->sm_base = (void __force *)sm_base;
-	ctrlpriv->sm_size = res->end - res->start + 1;
-
-	/*
-	 * Get the IRQ for security violations
-	 */
-#ifdef CONFIG_OF
+	/* Get the IRQ of the controller (for security violations only) */
 	ctrlpriv->secvio_irq = of_irq_to_resource(nprop, 0, NULL);
-#else
-	res = platform_get_resource_byname(pdev,
-		IORESOURCE_IRQ, "irq_sec_vio");
-	if (!res) {
-		dev_err(dev, "caam: invalid IRQ resource type\n");
-		return -ENODEV;
-	}
-	ctrlpriv->secvio_irq = res->start;
-#endif
 
 /*
  * ARM targets tend to have clock control subsystems that can
  * enable/disable clocking to our device. Turn clocking on to proceed
  */
 #ifdef CONFIG_ARM
-	ctrlpriv->caam_clk = clk_get(&ctrlpriv->pdev->dev, "caam_clk");
-	if (IS_ERR(ctrlpriv->caam_clk)) {
-		ret = PTR_ERR(ctrlpriv->caam_clk);
+	ctrlpriv->caam_ipg = devm_clk_get(&ctrlpriv->pdev->dev, "caam_ipg");
+	if (IS_ERR(ctrlpriv->caam_ipg)) {
+		ret = PTR_ERR(ctrlpriv->caam_ipg);
 		dev_err(&ctrlpriv->pdev->dev,
-			"can't identify CAAM bus clk: %d\n", ret);
+			"can't identify CAAM ipg clk: %d\n", ret);
+		return -ENODEV;
+	}
+	ctrlpriv->caam_mem = devm_clk_get(&ctrlpriv->pdev->dev, "caam_mem");
+	if (IS_ERR(ctrlpriv->caam_mem)) {
+		ret = PTR_ERR(ctrlpriv->caam_mem);
+		dev_err(&ctrlpriv->pdev->dev,
+			"can't identify CAAM secure mem clk: %d\n", ret);
+		return -ENODEV;
+	}
+	ctrlpriv->caam_aclk = devm_clk_get(&ctrlpriv->pdev->dev, "caam_aclk");
+	if (IS_ERR(ctrlpriv->caam_aclk)) {
+		ret = PTR_ERR(ctrlpriv->caam_aclk);
+		dev_err(&ctrlpriv->pdev->dev,
+			"can't identify CAAM aclk clk: %d\n", ret);
 		return -ENODEV;
 	}
 
-	ret = clk_enable(ctrlpriv->caam_clk);
+	ret = clk_prepare(ctrlpriv->caam_ipg);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "can't enable CAAM bus clock: %d\n", ret);
+		dev_err(&pdev->dev, "can't prepare CAAM ipg clock: %d\n", ret);
+		return -ENODEV;
+	}
+	ret = clk_prepare(ctrlpriv->caam_mem);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "can't prepare CAAM secure mem clock: %d\n", ret);
+		return -ENODEV;
+	}
+	ret = clk_prepare(ctrlpriv->caam_aclk);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "can't prepare CAAM aclk clock: %d\n", ret);
 		return -ENODEV;
 	}
 
-	pr_debug("%s caam_clk:%d\n", __func__,
-		(int)clk_get_rate(ctrlpriv->caam_clk));
+	ret = clk_enable(ctrlpriv->caam_ipg);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "can't enable CAAM ipg clock: %d\n", ret);
+		return -ENODEV;
+	}
+	ret = clk_enable(ctrlpriv->caam_mem);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "can't enable CAAM secure mem clock: %d\n", ret);
+		return -ENODEV;
+	}
+	ret = clk_enable(ctrlpriv->caam_aclk);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "can't enable CAAM aclk clock: %d\n", ret);
+		return -ENODEV;
+	}
+
+	pr_debug("%s caam_ipg clock:%d\n", __func__,
+		(int)clk_get_rate(ctrlpriv->caam_ipg));
+	pr_debug("%s caam_mem clock:%d\n", __func__,
+		(int)clk_get_rate(ctrlpriv->caam_mem));
+	pr_debug("%s caam_aclk clock:%d\n", __func__,
+		(int)clk_get_rate(ctrlpriv->caam_aclk));
 #endif
 
 	/*
 	 * Enable DECO watchdogs and, if this is a PHYS_ADDR_T_64BIT kernel,
-	 * 36-bit pointers in master configuration register
+	 * long pointers in master configuration register
 	 */
 	setbits32(&topregs->ctrl.mcr, MCFGR_WDENABLE |
 		  (sizeof(dma_addr_t) == sizeof(u64) ? MCFGR_LONG_PTR : 0));
@@ -362,16 +356,12 @@ static int caam_probe(struct platform_device *pdev)
 
 	/* Set DMA masks according to platform ranging */
 	if (sizeof(dma_addr_t) == sizeof(u64))
-		dma_set_mask(dev, DMA_BIT_MASK(36));
+		if (of_device_is_compatible(nprop, "fsl,sec-v5.0"))
+			dma_set_mask(dev, DMA_BIT_MASK(40));
+		else
+			dma_set_mask(dev, DMA_BIT_MASK(36));
 	else
 		dma_set_mask(dev, DMA_BIT_MASK(32));
-
-	/* Find out how many DECOs are present */
-	deconum = (rd_reg64(&topregs->ctrl.perfmon.cha_num) &
-		   CHA_NUM_DECONUM_MASK) >> CHA_NUM_DECONUM_SHIFT;
-
-	ctrlpriv->deco = kmalloc(deconum * sizeof(struct caam_deco *),
-				 GFP_KERNEL);
 
 	/*
 	 * Detect and enable JobRs
@@ -379,35 +369,14 @@ static int caam_probe(struct platform_device *pdev)
 	 * for all, then go probe each one.
 	 */
 	rspec = 0;
-#ifdef CONFIG_OF
 	for_each_compatible_node(np, NULL, "fsl,sec-v4.0-job-ring")
 		rspec++;
-#else
-	np = NULL;
-
-	/* Build the name of the IRQ platform resources to identify */
-	rname = kzalloc(strlen(JR_IRQRES_NAME_ROOT) + 1, 0);
-	if (rname == NULL) {
-		iounmap(&topregs->ctrl);
-		return -ENOMEM;
-	}
-
-	/*
-	 * Emulate behavor of for_each_compatible_node() for non OF targets
-	 * Identify all IRQ platform resources present
-	 */
-	for (d = 0; d < 4; d++)	{
-		rname[0] = 0;
-		inst = '0' + d;
-		strcat(rname, JR_IRQRES_NAME_ROOT);
-		strncat(rname, &inst, 1);
-		res = platform_get_resource_byname(pdev,
-					IORESOURCE_IRQ, rname);
-		if (res)
+	if (!rspec) {
+		/* for backward compatible with device trees */
+		for_each_compatible_node(np, NULL, "fsl,sec4.0-job-ring")
 			rspec++;
 	}
-	kfree(rname);
-#endif
+
 	ctrlpriv->jrdev = kzalloc(sizeof(struct device *) * rspec, GFP_KERNEL);
 	if (ctrlpriv->jrdev == NULL) {
 		iounmap(&topregs->ctrl);
@@ -416,14 +385,40 @@ static int caam_probe(struct platform_device *pdev)
 
 	ring = 0;
 	ctrlpriv->total_jobrs = 0;
-#ifdef CONFIG_OF
 	for_each_compatible_node(np, NULL, "fsl,sec-v4.0-job-ring") {
-#else
-	for (d = 0; d < rspec; d++)	{
-#endif
-		caam_jr_probe(pdev, np, ring);
+		ret = caam_jr_probe(pdev, np, ring);
+		if (ret < 0) {
+			/*
+			 * Job ring not found, error out.  At some
+			 * point, we should enhance job ring handling
+			 * to allow for non-consecutive job rings to
+			 * be found.
+			 */
+			pr_err("fsl,sec-v4.0-job-ring not found ");
+			pr_err("(ring %d)\n", ring);
+			return ret;
+		}
 		ctrlpriv->total_jobrs++;
 		ring++;
+	}
+
+	if (!ring) {
+		for_each_compatible_node(np, NULL, "fsl,sec4.0-job-ring") {
+			ret = caam_jr_probe(pdev, np, ring);
+			if (ret < 0) {
+				/*
+				 * Job ring not found, error out.  At some
+				 * point, we should enhance job ring handling
+				 * to allow for non-consecutive job rings to
+				 * be found.
+				 */
+				pr_err("fsl,sec4.0-job-ring not found ");
+				pr_err("(ring %d)\n", ring);
+				return ret;
+			}
+			ctrlpriv->total_jobrs++;
+			ring++;
+		}
 	}
 
 	/* Check to see if QI present. If so, enable */
@@ -451,13 +446,27 @@ static int caam_probe(struct platform_device *pdev)
 	 */
 	if ((rd_reg64(&topregs->ctrl.perfmon.cha_id) & CHA_ID_RNG_MASK)
 	    == CHA_ID_RNG_4) {
-		kick_trng(pdev);
-		ret = instantiate_rng(ctrlpriv->jrdev[0]);
-		if (ret) {
-			caam_remove(pdev);
-			return -ENODEV;
+		struct rng4tst __iomem *r4tst;
+		u32 rng_if;
+
+		/*
+		 * Check to see if the RNG has already been instantiated.
+		 * If either the state 0 or 1 instantiated flags are set,
+		 * then don't continue on and try to instantiate the RNG
+		 * again.
+		 */
+		r4tst = &topregs->ctrl.r4tst[0];
+		rng_if = rd_reg32(&r4tst->rdsta);
+		rng_if = rng_if & RDSTA_IF;
+		if (!rng_if) {
+			kick_trng(pdev);
+			ret = instantiate_rng(ctrlpriv->jrdev[0]);
+			if (ret) {
+				caam_remove(pdev);
+				return -ENODEV;
+			}
+			ctrlpriv->rng_inst++;
 		}
-		ctrlpriv->rng_inst++;
 	}
 
 	/* NOTE: RTIC detection ought to go here, around Si time */
@@ -465,9 +474,11 @@ static int caam_probe(struct platform_device *pdev)
 	/* Initialize queue allocator lock */
 	spin_lock_init(&ctrlpriv->jr_alloc_lock);
 
+	caam_id = rd_reg64(&topregs->ctrl.perfmon.caam_id);
+
 	/* Report "alive" for developer to see */
-	dev_info(dev, "device ID = 0x%016llx\n",
-		 rd_reg64(&topregs->ctrl.perfmon.caam_id));
+	dev_info(dev, "device ID = 0x%016llx (Era %d)\n", caam_id,
+		 caam_get_era(caam_id));
 	dev_info(dev, "job rings = %d, qi = %d\n",
 		 ctrlpriv->total_jobrs, ctrlpriv->qi_present);
 
@@ -551,98 +562,31 @@ static int caam_probe(struct platform_device *pdev)
 						 ctrlpriv->ctl,
 						 &ctrlpriv->ctl_tdsk_wrap);
 #endif
-
-/*
- * Non OF configurations use plaform_device, and therefore cannot simply
- * go and get a device node by name, which the algapi module startup code
- * assumes is possible. Therefore, non OF configurations will have to
- * start up the API code explicitly, and forego modularization
- */
-#ifndef CONFIG_OF
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API
-	status = caam_algapi_startup(pdev);
-	if (status) {
-		caam_remove(pdev);
-		return status;
-	}
-#endif
-
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_AHASH_API
-	status = caam_algapi_hash_startup(pdev);
-	if (status) {
-		caam_remove(pdev);
-		return status;
-	}
-#endif
-
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_RNG_API
-	if (ctrlpriv->rng_inst)
-		caam_rng_startup(pdev);
-#endif
-
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_SM
-	status = caam_sm_startup(pdev);
-	if (status) {
-		caam_remove(pdev);
-		return status;
-	}
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_SM_TEST
-	caam_sm_example_init(pdev);
-#endif /* SM_TEST */
-#endif /* SM */
-
-#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_SECVIO
-	caam_secvio_startup(pdev);
-#endif /* SECVIO */
-
-#endif /* CONFIG_OF */
-	return status;
+	return 0;
 }
 
-#ifdef CONFIG_OF
 static struct of_device_id caam_match[] = {
 	{
 		.compatible = "fsl,sec-v4.0",
 	},
+	{
+		.compatible = "fsl,sec4.0",
+	},
 	{},
 };
 MODULE_DEVICE_TABLE(of, caam_match);
-#endif /* CONFIG_OF */
 
 static struct platform_driver caam_driver = {
 	.driver = {
 		.name = "caam",
 		.owner = THIS_MODULE,
-#ifdef CONFIG_OF
 		.of_match_table = caam_match,
-#else
-
-#endif
 	},
 	.probe       = caam_probe,
-	.remove      = __devexit_p(caam_remove),
+	.remove      = caam_remove,
 };
 
-static int __init caam_base_init(void)
-{
-#ifdef CONFIG_OF
-	return of_register_platform_driver(&caam_driver);
-#else
-	return platform_driver_register(&caam_driver);
-#endif
-}
-
-static void __exit caam_base_exit(void)
-{
-#ifdef CONFIG_OF
-	return of_unregister_platform_driver(&caam_driver);
-#else
-	return platform_driver_unregister(&caam_driver);
-#endif
-}
-
-module_init(caam_base_init);
-module_exit(caam_base_exit);
+module_platform_driver(caam_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("FSL CAAM request backend");

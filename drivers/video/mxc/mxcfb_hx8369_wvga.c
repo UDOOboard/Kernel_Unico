@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,13 +26,10 @@
 #include <linux/io.h>
 #include <linux/bitops.h>
 #include <linux/spinlock.h>
+#include <linux/mipi_dsi.h>
 #include <linux/mxcfb.h>
 #include <linux/backlight.h>
 #include <video/mipi_display.h>
-
-#include <mach/hardware.h>
-#include <mach/clock.h>
-#include <mach/mipi_dsi.h>
 
 #include "mipi_dsi.h"
 
@@ -184,8 +181,6 @@ static struct mipi_lcd_config lcd_config = {
 void mipid_hx8369_get_lcd_videomode(struct fb_videomode **mode, int *size,
 		struct mipi_lcd_config **data)
 {
-	if (cpu_is_mx6dl())
-		truly_lcd_modedb[0].pixclock = 37037; /* 27M clock*/
 	*mode = &truly_lcd_modedb[0];
 	*size = ARRAY_SIZE(truly_lcd_modedb);
 	*data = &lcd_config;

@@ -48,7 +48,6 @@
 
 #include <asm/debugreg.h>
 #include <asm/apicdef.h>
-#include <asm/system.h>
 #include <asm/apic.h>
 #include <asm/nmi.h>
 
@@ -69,8 +68,6 @@ struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] =
 	{ "ss", 4, offsetof(struct pt_regs, ss) },
 	{ "ds", 4, offsetof(struct pt_regs, ds) },
 	{ "es", 4, offsetof(struct pt_regs, es) },
-	{ "fs", 4, -1 },
-	{ "gs", 4, -1 },
 #else
 	{ "ax", 8, offsetof(struct pt_regs, ax) },
 	{ "bx", 8, offsetof(struct pt_regs, bx) },
@@ -92,7 +89,11 @@ struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] =
 	{ "flags", 4, offsetof(struct pt_regs, flags) },
 	{ "cs", 4, offsetof(struct pt_regs, cs) },
 	{ "ss", 4, offsetof(struct pt_regs, ss) },
+	{ "ds", 4, -1 },
+	{ "es", 4, -1 },
 #endif
+	{ "fs", 4, -1 },
+	{ "gs", 4, -1 },
 };
 
 int dbg_set_reg(int regno, void *mem, struct pt_regs *regs)
@@ -443,12 +444,12 @@ void kgdb_roundup_cpus(unsigned long flags)
 
 /**
  *	kgdb_arch_handle_exception - Handle architecture specific GDB packets.
- *	@vector: The error vector of the exception that happened.
+ *	@e_vector: The error vector of the exception that happened.
  *	@signo: The signal number of the exception that happened.
  *	@err_code: The error code of the exception that happened.
- *	@remcom_in_buffer: The buffer of the packet we have read.
- *	@remcom_out_buffer: The buffer of %BUFMAX bytes to write a packet into.
- *	@regs: The &struct pt_regs of the current process.
+ *	@remcomInBuffer: The buffer of the packet we have read.
+ *	@remcomOutBuffer: The buffer of %BUFMAX bytes to write a packet into.
+ *	@linux_regs: The &struct pt_regs of the current process.
  *
  *	This function MUST handle the 'c' and 's' command packets,
  *	as well packets to set / remove a hardware breakpoint, if used.
@@ -513,28 +514,37 @@ single_step_cont(struct pt_regs *regs, struct die_args *args)
 
 static int was_in_debug_nmi[NR_CPUS];
 
-static int __kgdb_notify(struct die_args *args, unsigned long cmd)
+static int kgdb_nmi_handler(unsigned int cmd, struct pt_regs *regs)
 {
-	struct pt_regs *regs = args->regs;
-
 	switch (cmd) {
-	case DIE_NMI:
+	case NMI_LOCAL:
 		if (atomic_read(&kgdb_active) != -1) {
 			/* KGDB CPU roundup */
 			kgdb_nmicallback(raw_smp_processor_id(), regs);
 			was_in_debug_nmi[raw_smp_processor_id()] = 1;
 			touch_nmi_watchdog();
-			return NOTIFY_STOP;
+			return NMI_HANDLED;
 		}
-		return NOTIFY_DONE;
+		break;
 
-	case DIE_NMIUNKNOWN:
+	case NMI_UNKNOWN:
 		if (was_in_debug_nmi[raw_smp_processor_id()]) {
 			was_in_debug_nmi[raw_smp_processor_id()] = 0;
-			return NOTIFY_STOP;
+			return NMI_HANDLED;
 		}
-		return NOTIFY_DONE;
+		break;
+	default:
+		/* do nothing */
+		break;
+	}
+	return NMI_DONE;
+}
 
+static int __kgdb_notify(struct die_args *args, unsigned long cmd)
+{
+	struct pt_regs *regs = args->regs;
+
+	switch (cmd) {
 	case DIE_DEBUG:
 		if (atomic_read(&kgdb_cpu_doing_single_step) != -1) {
 			if (user_mode(regs))
@@ -592,11 +602,6 @@ kgdb_notify(struct notifier_block *self, unsigned long cmd, void *ptr)
 
 static struct notifier_block kgdb_notifier = {
 	.notifier_call	= kgdb_notify,
-
-	/*
-	 * Lowest-prio notifier priority, we want to be notified last:
-	 */
-	.priority	= NMI_LOCAL_LOW_PRIOR,
 };
 
 /**
@@ -607,10 +612,34 @@ static struct notifier_block kgdb_notifier = {
  */
 int kgdb_arch_init(void)
 {
-	return register_die_notifier(&kgdb_notifier);
+	int retval;
+
+	retval = register_die_notifier(&kgdb_notifier);
+	if (retval)
+		goto out;
+
+	retval = register_nmi_handler(NMI_LOCAL, kgdb_nmi_handler,
+					0, "kgdb");
+	if (retval)
+		goto out1;
+
+	retval = register_nmi_handler(NMI_UNKNOWN, kgdb_nmi_handler,
+					0, "kgdb");
+
+	if (retval)
+		goto out2;
+
+	return retval;
+
+out2:
+	unregister_nmi_handler(NMI_LOCAL, "kgdb");
+out1:
+	unregister_die_notifier(&kgdb_notifier);
+out:
+	return retval;
 }
 
-static void kgdb_hw_overflow_handler(struct perf_event *event, int nmi,
+static void kgdb_hw_overflow_handler(struct perf_event *event,
 		struct perf_sample_data *data, struct pt_regs *regs)
 {
 	struct task_struct *tsk = current;
@@ -640,7 +669,7 @@ void kgdb_arch_late(void)
 	for (i = 0; i < HBP_NUM; i++) {
 		if (breakinfo[i].pev)
 			continue;
-		breakinfo[i].pev = register_wide_hw_breakpoint(&attr, NULL);
+		breakinfo[i].pev = register_wide_hw_breakpoint(&attr, NULL, NULL);
 		if (IS_ERR((void * __force)breakinfo[i].pev)) {
 			printk(KERN_ERR "kgdb: Could not allocate hw"
 			       "breakpoints\nDisabling the kernel debugger\n");
@@ -675,6 +704,8 @@ void kgdb_arch_exit(void)
 			breakinfo[i].pev = NULL;
 		}
 	}
+	unregister_nmi_handler(NMI_UNKNOWN, "kgdb");
+	unregister_nmi_handler(NMI_LOCAL, "kgdb");
 	unregister_die_notifier(&kgdb_notifier);
 }
 
@@ -715,7 +746,9 @@ void kgdb_arch_set_pc(struct pt_regs *regs, unsigned long ip)
 int kgdb_arch_set_breakpoint(struct kgdb_bkpt *bpt)
 {
 	int err;
+#ifdef CONFIG_DEBUG_RODATA
 	char opc[BREAK_INSTR_SIZE];
+#endif /* CONFIG_DEBUG_RODATA */
 
 	bpt->type = BP_BREAKPOINT;
 	err = probe_kernel_read(bpt->saved_instr, (char *)bpt->bpt_addr,

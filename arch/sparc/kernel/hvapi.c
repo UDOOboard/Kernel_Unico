@@ -3,7 +3,7 @@
  * Copyright (C) 2007 David S. Miller <davem@davemloft.net>
  */
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/init.h>
 
 #include <asm/hypervisor.h>
@@ -45,6 +45,7 @@ static struct api_info api_table[] = {
 	{ .group = HV_GRP_NIU,					},
 	{ .group = HV_GRP_VF_CPU,				},
 	{ .group = HV_GRP_KT_CPU,				},
+	{ .group = HV_GRP_VT_CPU,				},
 	{ .group = HV_GRP_DIAG,		.flags = FLAG_PRE_API	},
 };
 
@@ -193,7 +194,7 @@ void __init sun4v_hvapi_init(void)
 
 bad:
 	prom_printf("HVAPI: Cannot register API group "
-		    "%lx with major(%u) minor(%u)\n",
+		    "%lx with major(%lu) minor(%lu)\n",
 		    group, major, minor);
 	prom_halt();
 }

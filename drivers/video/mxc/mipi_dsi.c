@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,17 +25,18 @@
 #include <linux/io.h>
 #include <linux/bitops.h>
 #include <linux/ipu.h>
+#include <linux/mfd/syscon.h>
+#include <linux/mfd/syscon/imx6q-iomuxc-gpr.h>
+#include <linux/mipi_dsi.h>
+#include <linux/module.h>
 #include <linux/mxcfb.h>
-#include <linux/regulator/consumer.h>
 #include <linux/backlight.h>
+#include <linux/of_device.h>
+#include <linux/regulator/consumer.h>
+#include <linux/reset.h>
 #include <linux/spinlock.h>
 #include <linux/delay.h>
-#include <linux/fsl_devices.h>
 #include <video/mipi_display.h>
-
-#include <mach/hardware.h>
-#include <mach/clock.h>
-#include <mach/mipi_dsi.h>
 
 #include "mxc_dispdrv.h"
 #include "mipi_dsi.h"
@@ -52,7 +53,6 @@
 #define	DSI_CLKMGR_CFG_CLK_DIV		(0x107)
 #define DSI_GEN_PLD_DATA_BUF_ENTRY	(0x10)
 #define	MIPI_MUX_CTRL(v)		(((v) & 0x3) << 4)
-#define	IOMUXC_GPR3_OFFSET		(0xc)
 #define	MIPI_LCD_SLEEP_MODE_DELAY	(120)
 #define	MIPI_DSI_REG_RW_TIMEOUT		(20)
 #define	MIPI_DSI_PHY_TIMEOUT		(10)
@@ -507,7 +507,8 @@ static int mipi_dsi_power_on(struct mxc_dispdrv_handle *disp)
 	struct mipi_dsi_info *mipi_dsi = mxc_dispdrv_getdata(disp);
 
 	if (!mipi_dsi->dsi_power_on) {
-		clk_enable(mipi_dsi->dphy_clk);
+		clk_prepare_enable(mipi_dsi->dphy_clk);
+		clk_prepare_enable(mipi_dsi->cfg_clk);
 		mipi_dsi_enable_controller(mipi_dsi, false);
 		mipi_dsi_set_mode(mipi_dsi, false);
 		/* host send pclk/hsync/vsync for two frames before sleep-out */
@@ -551,7 +552,8 @@ void mipi_dsi_power_off(struct mxc_dispdrv_handle *disp)
 		mipi_dsi_set_mode(mipi_dsi, true);
 		mipi_dsi_disable_controller(mipi_dsi);
 		mipi_dsi->dsi_power_on = 0;
-		clk_disable(mipi_dsi->dphy_clk);
+		clk_disable_unprepare(mipi_dsi->dphy_clk);
+		clk_disable_unprepare(mipi_dsi->cfg_clk);
 	}
 }
 
@@ -627,17 +629,19 @@ int mipi_dsi_enable(struct mxc_dispdrv_handle *disp)
 	struct mipi_dsi_info *mipi_dsi = mxc_dispdrv_getdata(disp);
 
 	if (!mipi_dsi->lcd_inited) {
-		err = clk_enable(mipi_dsi->dphy_clk);
+		err = clk_prepare_enable(mipi_dsi->dphy_clk);
+		err |= clk_prepare_enable(mipi_dsi->cfg_clk);
 		if (err)
 			dev_err(&mipi_dsi->pdev->dev,
-				"clk_enable error:%d!\n", err);
+				"clk enable error:%d!\n", err);
 		mipi_dsi_enable_controller(mipi_dsi, true);
 		err = mipi_dsi->lcd_callback->mipi_lcd_setup(
 			mipi_dsi);
 		if (err < 0) {
 			dev_err(&mipi_dsi->pdev->dev,
 				"failed to init mipi lcd.");
-			clk_disable(mipi_dsi->dphy_clk);
+			clk_disable_unprepare(mipi_dsi->dphy_clk);
+			clk_disable_unprepare(mipi_dsi->cfg_clk);
 			return err;
 		}
 		mipi_dsi_set_mode(mipi_dsi, false);
@@ -652,31 +656,9 @@ int mipi_dsi_enable(struct mxc_dispdrv_handle *disp)
 static int mipi_dsi_disp_init(struct mxc_dispdrv_handle *disp,
 	struct mxc_dispdrv_setting *setting)
 {
-	int	   err;
-	void __iomem *reg_base;
-	u32    val;
-	char   dphy_clk[] = "mipi_pllref_clk";
-	struct resource *res;
-	struct resource *res_irq;
-	struct device	*dev;
-	struct mipi_dsi_info		  *mipi_dsi;
-	struct mipi_dsi_platform_data *pdata;
-
-	mipi_dsi = mxc_dispdrv_getdata(disp);
-	if (IS_ERR(mipi_dsi)) {
-		pr_err("failed to get dispdrv data\n");
-		return -EINVAL;
-	}
-	dev	= &mipi_dsi->pdev->dev;
-	pdata = dev->platform_data;
-	if (!pdata) {
-		dev_err(dev, "No platform_data available\n");
-		return -EINVAL;
-	}
-
-	mipi_dsi->lcd_panel = kstrdup(pdata->lcd_panel, GFP_KERNEL);
-	if (!mipi_dsi->lcd_panel)
-		return -ENOMEM;
+	struct mipi_dsi_info *mipi_dsi = mxc_dispdrv_getdata(disp);
+	struct device *dev = &mipi_dsi->pdev->dev;
+	int ret = 0;
 
 	if (!valid_mode(setting->if_fmt)) {
 		dev_warn(dev, "Input pixel format not valid"
@@ -684,221 +666,28 @@ static int mipi_dsi_disp_init(struct mxc_dispdrv_handle *disp,
 		setting->if_fmt = IPU_PIX_FMT_RGB24;
 	}
 
-	res = platform_get_resource(mipi_dsi->pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(dev, "get platform resource 0 error\n");
-		return -ENODEV;
-	}
+	setting->dev_id = mipi_dsi->dev_id;
+	setting->disp_id = mipi_dsi->disp_id;
 
-	res = request_mem_region(res->start, resource_size(res),
-				mipi_dsi->pdev->name);
-	if (!res) {
-		dev_err(dev, "request mem region error\n");
-		return -EBUSY;
-	}
-	mipi_dsi->mmio_base = ioremap(res->start, resource_size(res));
-	if (!mipi_dsi->mmio_base) {
-		dev_err(dev, "Cannot map mipi dsi registers\n");
-		err = -EIO;
-		goto err_ioremap;
-	}
-
-	res = platform_get_resource(mipi_dsi->pdev, IORESOURCE_MEM, 1);
-	if (!res) {
-		dev_err(dev, "get platform resource 1 error\n");
-		err = -ENODEV;
-		goto err_get_res1;
-	}
-
-	reg_base = ioremap(res->start, resource_size(res));
-	if (!reg_base) {
-		dev_err(dev, "Cannot map iomuxc registers\n");
-		err = -EIO;
-		goto err_ioremap_iomuxc;
-	}
-	val = ioread32(reg_base + IOMUXC_GPR3_OFFSET);
-	val |= MIPI_MUX_CTRL((pdata->ipu_id << 1) | (pdata->disp_id));
-	iowrite32(val, reg_base + IOMUXC_GPR3_OFFSET);
-	iounmap(reg_base);
-
-	res_irq = platform_get_resource(mipi_dsi->pdev, IORESOURCE_IRQ, 0);
-	if (!res_irq) {
-		dev_err(dev, "failed to acquire irq resource\n");
-		err = -ENODEV;
-		goto err_get_irq;
-	}
-	mipi_dsi->irq = res_irq->start;
-
-	mipi_dsi->dphy_clk = clk_get(dev, dphy_clk);
-	if (IS_ERR(mipi_dsi->dphy_clk)) {
-		dev_err(dev, "failed to get dphy pll_ref_clk\n");
-		err = PTR_ERR(mipi_dsi->dphy_clk);
-		goto err_clk;
-	}
-
-	dev_dbg(dev, "got resources: regs %p, irq:%d\n",
-				mipi_dsi->mmio_base, mipi_dsi->irq);
-
-	if (pdata->io_regulator) {
-		mipi_dsi->io_regulator = regulator_get(dev,
-			pdata->io_regulator);
-		if (IS_ERR(mipi_dsi->io_regulator)) {
-			dev_err(dev, "failed to get io_regulator\n");
-			err = PTR_ERR(mipi_dsi->io_regulator);
-			goto err_ioreg;
-		}
-		err = regulator_set_voltage(mipi_dsi->io_regulator,
-				      pdata->io_volt,
-				      pdata->io_volt);
-		if (err < 0) {
-			dev_err(dev, "failed to set io_regulator voltage\n");
-			goto err_corereg;
-		}
-		err = regulator_enable(mipi_dsi->io_regulator);
-		if (err < 0) {
-			dev_err(dev, "failed to enable io_regulator voltage\n");
-			goto err_corereg;
-		}
-	}
-	if (pdata->core_regulator) {
-		mipi_dsi->core_regulator = regulator_get(dev,
-			pdata->core_regulator);
-		if (IS_ERR(mipi_dsi->core_regulator)) {
-			dev_err(dev, "failed to get core_regulator\n");
-			err = PTR_ERR(mipi_dsi->core_regulator);
-			goto err_corereg;
-		}
-		err = regulator_set_voltage(mipi_dsi->core_regulator,
-				      pdata->core_volt,
-				      pdata->core_volt);
-		if (err < 0) {
-			dev_err(dev, "failed to set core_regulator voltage\n");
-			goto err_analogreg;
-		}
-		err = regulator_enable(mipi_dsi->core_regulator);
-		if (err < 0) {
-			dev_err(dev,
-				"failed to enable core_regulator voltage\n");
-			goto err_analogreg;
-		}
-	}
-	if (pdata->analog_regulator) {
-		mipi_dsi->analog_regulator =
-				regulator_get(dev, pdata->analog_regulator);
-		if (IS_ERR(mipi_dsi->analog_regulator)) {
-			dev_err(dev, "failed to get analog_regulator\n");
-			err = PTR_ERR(mipi_dsi->analog_regulator);
-			goto err_analogreg;
-		}
-		err = regulator_set_voltage(mipi_dsi->analog_regulator,
-				      pdata->analog_volt,
-				      pdata->analog_volt);
-		if (err < 0) {
-			dev_err(dev,
-				"failed to set analog_regulator voltage\n");
-			goto err_pdata_init;
-		}
-		err = regulator_enable(mipi_dsi->analog_regulator);
-		if (err < 0) {
-			dev_err(dev,
-				"failed to enable analog_regulator voltage\n");
-			goto err_pdata_init;
-		}
-	}
-	if (pdata->lcd_power)
-		pdata->lcd_power(true);
-	if (pdata->backlight_power)
-		pdata->backlight_power(true);
-
-	if (pdata->init) {
-		err = pdata->init(mipi_dsi->pdev);
-		if (err < 0) {
-			dev_err(dev, "failed to do pdata->init()\n");
-			goto err_pdata_init;
-		}
-	}
-	if (pdata->reset)
-		pdata->reset();
-
-	mipi_dsi->ipu_id = pdata->ipu_id;
-	mipi_dsi->disp_id = pdata->disp_id;
-	mipi_dsi->reset = pdata->reset;
-	mipi_dsi->lcd_power	= pdata->lcd_power;
-	mipi_dsi->backlight_power = pdata->backlight_power;
-
-	/* ipu selected by platform data setting */
-	setting->dev_id = pdata->ipu_id;
-	setting->disp_id = pdata->disp_id;
-
-	err = request_irq(mipi_dsi->irq, mipi_dsi_irq_handler,
-			  0, "mipi_dsi", mipi_dsi);
-	if (err) {
-		dev_err(dev, "failed to request irq\n");
-		err = -EBUSY;
-		goto err_req_irq;
-	}
-
-	err = mipi_dsi_lcd_init(mipi_dsi, setting);
-	if (err < 0) {
+	ret = mipi_dsi_lcd_init(mipi_dsi, setting);
+	if (ret) {
 		dev_err(dev, "failed to init mipi dsi lcd\n");
-		goto err_dsi_lcd;
+		return ret;
 	}
 
 	dev_dbg(dev, "MIPI DSI dispdrv inited!\n");
-	return 0;
-
-err_dsi_lcd:
-	free_irq(mipi_dsi->irq, mipi_dsi);
-err_req_irq:
-	if (pdata->exit)
-		pdata->exit(mipi_dsi->pdev);
-err_pdata_init:
-	/* cannot disable analog/io/core regulator, maybe others use it,
-	 * according to board design
-	 */
-	if (mipi_dsi->analog_regulator)
-		regulator_put(mipi_dsi->analog_regulator);
-err_analogreg:
-	if (mipi_dsi->core_regulator)
-		regulator_put(mipi_dsi->core_regulator);
-err_corereg:
-	if (mipi_dsi->io_regulator)
-		regulator_put(mipi_dsi->io_regulator);
-err_ioreg:
-	clk_put(mipi_dsi->dphy_clk);
-err_clk:
-err_get_irq:
-err_get_res1:
-err_ioremap_iomuxc:
-	iounmap(mipi_dsi->mmio_base);
-err_ioremap:
-	release_mem_region(res->start, resource_size(res));
-
-	return err;
+	return ret;
 }
 
 static void mipi_dsi_disp_deinit(struct mxc_dispdrv_handle *disp)
 {
 	struct mipi_dsi_info    *mipi_dsi;
-	struct resource			*res;
 
 	mipi_dsi = mxc_dispdrv_getdata(disp);
-	res = platform_get_resource(mipi_dsi->pdev, IORESOURCE_MEM, 0);
 
-	disable_irq(mipi_dsi->irq);
-	free_irq(mipi_dsi->irq, mipi_dsi);
 	mipi_dsi_power_off(mipi_dsi->disp_mipi);
 	if (mipi_dsi->bl)
 		backlight_device_unregister(mipi_dsi->bl);
-	if (mipi_dsi->analog_regulator)
-		regulator_put(mipi_dsi->analog_regulator);
-	if (mipi_dsi->core_regulator)
-		regulator_put(mipi_dsi->core_regulator);
-	if (mipi_dsi->io_regulator)
-		regulator_put(mipi_dsi->io_regulator);
-	clk_put(mipi_dsi->dphy_clk);
-	iounmap(mipi_dsi->mmio_base);
-	release_mem_region(res->start, resource_size(res));
 }
 
 static struct mxc_dispdrv_driver mipi_dsi_drv = {
@@ -908,6 +697,49 @@ static struct mxc_dispdrv_driver mipi_dsi_drv = {
 	.enable	= mipi_dsi_enable,
 	.disable = mipi_dsi_power_off,
 };
+
+static int imx6q_mipi_dsi_get_mux(int dev_id, int disp_id)
+{
+	if (dev_id > 1 || disp_id > 1)
+		return -EINVAL;
+
+	return (dev_id << 5) | (disp_id << 4);
+}
+
+static struct mipi_dsi_bus_mux imx6q_mipi_dsi_mux[] = {
+	{
+		.reg = IOMUXC_GPR3,
+		.mask = IMX6Q_GPR3_MIPI_MUX_CTL_MASK,
+		.get_mux = imx6q_mipi_dsi_get_mux,
+	},
+};
+
+static int imx6dl_mipi_dsi_get_mux(int dev_id, int disp_id)
+{
+	if (dev_id > 1 || disp_id > 1)
+		return -EINVAL;
+
+	/* MIPI DSI source is LCDIF */
+	if (dev_id)
+		disp_id = 0;
+
+	return (dev_id << 5) | (disp_id << 4);
+}
+
+static struct mipi_dsi_bus_mux imx6dl_mipi_dsi_mux[] = {
+	{
+		.reg = IOMUXC_GPR3,
+		.mask = IMX6Q_GPR3_MIPI_MUX_CTL_MASK,
+		.get_mux = imx6dl_mipi_dsi_get_mux,
+	},
+};
+
+static const struct of_device_id imx_mipi_dsi_dt_ids[] = {
+	{ .compatible = "fsl,imx6q-mipi-dsi", .data = imx6q_mipi_dsi_mux, },
+	{ .compatible = "fsl,imx6dl-mipi-dsi", .data = imx6dl_mipi_dsi_mux, },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, imx_mipi_dsi_dt_ids);
 
 /**
  * This function is called by the driver framework to initialize the MIPI DSI
@@ -920,33 +752,145 @@ static struct mxc_dispdrv_driver mipi_dsi_drv = {
  */
 static int mipi_dsi_probe(struct platform_device *pdev)
 {
-	int ret;
+	struct device_node *np = pdev->dev.of_node;
+	const struct of_device_id *of_id =
+			of_match_device(of_match_ptr(imx_mipi_dsi_dt_ids),
+					&pdev->dev);
 	struct mipi_dsi_info *mipi_dsi;
+	struct resource *res;
+	u32 dev_id, disp_id;
+	const char *lcd_panel;
+	unsigned int mux;
+	int ret = 0;
 
-	mipi_dsi = kzalloc(sizeof(struct mipi_dsi_info), GFP_KERNEL);
-	if (!mipi_dsi) {
+	mipi_dsi = devm_kzalloc(&pdev->dev, sizeof(*mipi_dsi), GFP_KERNEL);
+	if (!mipi_dsi)
+		return -ENOMEM;
+
+	ret = of_property_read_string(np, "lcd_panel", &lcd_panel);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to read of property lcd_panel\n");
+		return ret;
+	}
+
+	ret = of_property_read_u32(np, "dev_id", &dev_id);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to read of property dev_id\n");
+		return ret;
+	}
+	ret = of_property_read_u32(np, "disp_id", &disp_id);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to read of property disp_id\n");
+		return ret;
+	}
+	mipi_dsi->dev_id = dev_id;
+	mipi_dsi->disp_id = disp_id;
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res) {
+		dev_err(&pdev->dev, "failed to get platform resource 0\n");
+		return -ENODEV;
+	}
+
+	if (!devm_request_mem_region(&pdev->dev, res->start,
+				resource_size(res), pdev->name))
+		return -EBUSY;
+
+	mipi_dsi->mmio_base = devm_ioremap(&pdev->dev, res->start,
+				   resource_size(res));
+	if (!mipi_dsi->mmio_base)
+		return -EBUSY;
+
+	mipi_dsi->irq = platform_get_irq(pdev, 0);
+	if (mipi_dsi->irq < 0) {
+		dev_err(&pdev->dev, "failed get device irq\n");
+		return -ENODEV;
+	}
+
+	ret = devm_request_irq(&pdev->dev, mipi_dsi->irq,
+				mipi_dsi_irq_handler,
+				0, "mipi_dsi", mipi_dsi);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to request irq\n");
+		return ret;
+	}
+
+	mipi_dsi->dphy_clk = devm_clk_get(&pdev->dev, "mipi_pllref_clk");
+	if (IS_ERR(mipi_dsi->dphy_clk)) {
+		dev_err(&pdev->dev, "failed to get dphy pll_ref_clk\n");
+		return PTR_ERR(mipi_dsi->dphy_clk);
+	}
+
+	mipi_dsi->cfg_clk = devm_clk_get(&pdev->dev, "mipi_cfg_clk");
+	if (IS_ERR(mipi_dsi->cfg_clk)) {
+		dev_err(&pdev->dev, "failed to get cfg_clk\n");
+		return PTR_ERR(mipi_dsi->cfg_clk);
+	}
+
+	mipi_dsi->disp_power_on = devm_regulator_get(&pdev->dev,
+							"disp-power-on");
+	if (!IS_ERR(mipi_dsi->disp_power_on)) {
+		ret = regulator_enable(mipi_dsi->disp_power_on);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to enable display "
+				"power regulator, err=%d\n", ret);
+			return ret;
+		}
+	} else {
+		mipi_dsi->disp_power_on = NULL;
+	}
+
+	ret = device_reset(&pdev->dev);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to reset: %d\n", ret);
+		goto dev_reset_fail;
+	}
+
+	if (of_id)
+		mipi_dsi->bus_mux = of_id->data;
+
+	mipi_dsi->regmap = syscon_regmap_lookup_by_phandle(np, "gpr");
+	if (IS_ERR(mipi_dsi->regmap)) {
+		dev_err(&pdev->dev, "failed to get parent regmap\n");
+		ret = PTR_ERR(mipi_dsi->regmap);
+		goto get_parent_regmap_fail;
+	}
+
+	mux = mipi_dsi->bus_mux->get_mux(dev_id, disp_id);
+	if (mux >= 0)
+		regmap_update_bits(mipi_dsi->regmap, mipi_dsi->bus_mux->reg,
+				   mipi_dsi->bus_mux->mask, mux);
+	else
+		dev_warn(&pdev->dev, "invalid dev_id or disp_id muxing\n");
+
+	mipi_dsi->lcd_panel = kstrdup(lcd_panel, GFP_KERNEL);
+	if (!mipi_dsi->lcd_panel) {
+		dev_err(&pdev->dev, "failed to allocate lcd panel name\n");
 		ret = -ENOMEM;
-		goto alloc_failed;
+		goto kstrdup_fail;
 	}
 
 	mipi_dsi->pdev = pdev;
 	mipi_dsi->disp_mipi = mxc_dispdrv_register(&mipi_dsi_drv);
 	if (IS_ERR(mipi_dsi->disp_mipi)) {
-		dev_err(&pdev->dev, "mxc_dispdrv_register error:%ld!\n",
-			PTR_ERR(mipi_dsi->disp_mipi));
-		ret = -ENOMEM;
-		goto register_failed;
+		dev_err(&pdev->dev, "mxc_dispdrv_register error\n");
+		ret = PTR_ERR(mipi_dsi->disp_mipi);
+		goto dispdrv_reg_fail;
 	}
 
 	mxc_dispdrv_setdata(mipi_dsi->disp_mipi, mipi_dsi);
 	dev_set_drvdata(&pdev->dev, mipi_dsi);
 
 	dev_info(&pdev->dev, "i.MX MIPI DSI driver probed\n");
-	return 0;
+	return ret;
 
-register_failed:
-	kfree(mipi_dsi);
-alloc_failed:
+dispdrv_reg_fail:
+	kfree(mipi_dsi->lcd_panel);
+kstrdup_fail:
+get_parent_regmap_fail:
+dev_reset_fail:
+	if (mipi_dsi->disp_power_on)
+		regulator_disable(mipi_dsi->disp_power_on);
 	return ret;
 }
 
@@ -955,19 +899,19 @@ static void mipi_dsi_shutdown(struct platform_device *pdev)
 	struct mipi_dsi_info *mipi_dsi = dev_get_drvdata(&pdev->dev);
 
 	mipi_dsi_power_off(mipi_dsi->disp_mipi);
-	if (mipi_dsi->lcd_power)
-		mipi_dsi->lcd_power(false);
-	if (mipi_dsi->backlight_power)
-		mipi_dsi->backlight_power(false);
 }
 
-static int __devexit mipi_dsi_remove(struct platform_device *pdev)
+static int mipi_dsi_remove(struct platform_device *pdev)
 {
 	struct mipi_dsi_info *mipi_dsi = dev_get_drvdata(&pdev->dev);
 
 	mxc_dispdrv_puthandle(mipi_dsi->disp_mipi);
 	mxc_dispdrv_unregister(mipi_dsi->disp_mipi);
-	kfree(mipi_dsi);
+
+	if (mipi_dsi->disp_power_on)
+		regulator_disable(mipi_dsi->disp_power_on);
+
+	kfree(mipi_dsi->lcd_panel);
 	dev_set_drvdata(&pdev->dev, NULL);
 
 	return 0;
@@ -975,10 +919,11 @@ static int __devexit mipi_dsi_remove(struct platform_device *pdev)
 
 static struct platform_driver mipi_dsi_driver = {
 	.driver = {
+		   .of_match_table = imx_mipi_dsi_dt_ids,
 		   .name = "mxc_mipi_dsi",
 	},
 	.probe = mipi_dsi_probe,
-	.remove = __devexit_p(mipi_dsi_remove),
+	.remove = mipi_dsi_remove,
 	.shutdown = mipi_dsi_shutdown,
 };
 

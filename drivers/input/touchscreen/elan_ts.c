@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2007-2008 HTC Corporation.
  *
+ * Copyright (C) 2013 Freescale Semiconductor, Inc.
+ *
  * This driver is adapted from elan8232_i2c.c written by Shan-Fu Chiou
  * <sfchiou@gmail.com> and Jay Tu <jay_tu@htc.com>.
  * This driver is also adapted from the ELAN Touch Screen driver
@@ -26,12 +28,14 @@
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/hrtimer.h>
+#include <linux/of_gpio.h>
+#include <linux/regulator/consumer.h>
 #include <linux/gpio.h>
 
 static const char ELAN_TS_NAME[] = "elan-touch";
 
-#define ELAN_TS_X_MAX 		1088
-#define ELAN_TS_Y_MAX 		768
+#define ELAN_TS_X_MAX		1088
+#define ELAN_TS_Y_MAX		768
 #define ELAN_USER_X_MAX		800
 #define ELAN_USER_Y_MAX		600
 #define IDX_PACKET_SIZE		8
@@ -60,7 +64,7 @@ static struct elan_data {
 /*--------------------------------------------------------------*/
 static int elan_touch_detect_int_level(void)
 {
-	unsigned v;
+	int v;
 	v = gpio_get_value(elan_touch_data.intr_gpio);
 
 	return v;
@@ -91,9 +95,8 @@ static int __hello_packet_handler(struct i2c_client *client)
 
 	rc = elan_touch_poll(client);
 
-	if (rc < 0) {
+	if (rc < 0)
 		return -EINVAL;
-	}
 
 	rc = i2c_master_recv(client, buf_recv, 4);
 
@@ -101,7 +104,7 @@ static int __hello_packet_handler(struct i2c_client *client)
 		return rc;
 	} else {
 		int i;
-		printk("hello packet: [0x%02x 0x%02x 0x%02x 0x%02x]\n",
+		pr_info("hello packet: [0x%02x 0x%02x 0x%02x 0x%02x]\n",
 		       buf_recv[0], buf_recv[1], buf_recv[2], buf_recv[3]);
 
 		for (i = 0; i < 4; i++)
@@ -158,9 +161,8 @@ static int elan_touch_recv_data(struct i2c_client *client, uint8_t * buf)
 
 	memset(buf, 0, bytes_to_recv);
 	rc = i2c_master_recv(client, buf, bytes_to_recv);
-	if (rc != bytes_to_recv) {
+	if (rc != bytes_to_recv)
 		return -EINVAL;
-	}
 
 	return rc;
 }
@@ -247,7 +249,7 @@ static int elan_touch_register_interrupt(struct i2c_client *client)
 				&elan_touch_data);
 
 		if (err < 0) {
-			printk("%s(%s): Can't allocate irq %d\n", __FILE__,
+			pr_info("%s(%s): Can't allocate irq %d\n", __FILE__,
 			       __func__, client->irq);
 			elan_touch_data.use_irq = 0;
 		}
@@ -261,7 +263,7 @@ static int elan_touch_register_interrupt(struct i2c_client *client)
 			      HRTIMER_MODE_REL);
 	}
 
-	printk("elan ts starts in %s mode.\n",
+	pr_info("elan ts starts in %s mode.\n",
 	       elan_touch_data.use_irq == 1 ? "interrupt" : "polling");
 
 	return 0;
@@ -270,7 +272,55 @@ static int elan_touch_register_interrupt(struct i2c_client *client)
 static int elan_touch_probe(struct i2c_client *client,
 			    const struct i2c_device_id *id)
 {
-	int err = 0;
+	struct device_node *np = client->dev.of_node;
+	int gpio_elan_cs, gpio_elan_rst, err = 0;
+
+	if (!np)
+		return -ENODEV;
+
+	elan_touch_data.intr_gpio = of_get_named_gpio(np, "gpio_intr", 0);
+	if (!gpio_is_valid(elan_touch_data.intr_gpio))
+		return -ENODEV;
+
+	err = devm_gpio_request_one(&client->dev, elan_touch_data.intr_gpio,
+				GPIOF_IN, "gpio_elan_intr");
+	if (err < 0) {
+		dev_err(&client->dev,
+			"request gpio failed: %d\n", err);
+		return err;
+	}
+
+	/* elan touch init */
+	gpio_elan_cs = of_get_named_gpio(np, "gpio_elan_cs", 0);
+	if (!gpio_is_valid(gpio_elan_cs))
+		return -ENODEV;
+
+	err = devm_gpio_request_one(&client->dev, gpio_elan_cs,
+				GPIOF_OUT_INIT_HIGH, "gpio_elan_cs");
+	if (err < 0) {
+		dev_err(&client->dev,
+			"request gpio failed: %d\n", err);
+		return err;
+	}
+	gpio_set_value(gpio_elan_cs, 0);
+
+	gpio_elan_rst = of_get_named_gpio(np, "gpio_elan_rst", 0);
+	if (!gpio_is_valid(gpio_elan_rst))
+		return -ENODEV;
+
+	err = devm_gpio_request_one(&client->dev, gpio_elan_rst,
+				GPIOF_OUT_INIT_HIGH, "gpio_elan_rst");
+	if (err < 0) {
+		dev_err(&client->dev,
+			"request gpio failed: %d\n", err);
+		return err;
+	}
+	gpio_set_value(gpio_elan_rst, 0);
+	msleep(10);
+	gpio_set_value(gpio_elan_rst, 1);
+
+	gpio_set_value(gpio_elan_cs, 1);
+	msleep(100);
 
 	elan_wq = create_singlethread_workqueue("elan_wq");
 	if (!elan_wq) {
@@ -283,10 +333,6 @@ static int elan_touch_probe(struct i2c_client *client,
 
 	INIT_WORK(&elan_touch_data.work, elan_touch_work_func);
 
-	elan_touch_data.intr_gpio = irq_to_gpio(client->irq);
-	pr_debug("irq_to_gpio irq %d, gpio %d\n", client->irq,
-		 elan_touch_data.intr_gpio);
-
 	elan_touch_data.input = input_allocate_device();
 	if (elan_touch_data.input == NULL) {
 		err = -ENOMEM;
@@ -295,7 +341,7 @@ static int elan_touch_probe(struct i2c_client *client,
 
 	err = __elan_touch_init(client);
 	if (err < 0) {
-		printk("elan - Read Hello Packet Failed\n");
+		dev_err(&client->dev, "elan - Read Hello Packet Failed\n");
 		goto fail;
 	}
 
@@ -324,9 +370,8 @@ static int elan_touch_probe(struct i2c_client *client,
 			     ELAN_USER_Y_MAX, 0, 0);
 
 	err = input_register_device(elan_touch_data.input);
-	if (err < 0) {
+	if (err < 0)
 		goto fail;
-	}
 
 	elan_touch_register_interrupt(elan_touch_data.client);
 
@@ -358,6 +403,15 @@ static const struct i2c_device_id elan_touch_id[] = {
 	{"elan-touch", 0},
 	{}
 };
+
+static const struct of_device_id elan_dt_ids[] = {
+	{
+		.compatible = "elan,elan-touch",
+	}, {
+		/* sentinel */
+	}
+};
+MODULE_DEVICE_TABLE(of, elan_dt_ids);
 
 static int elan_suspend(struct device *dev)
 {
@@ -393,6 +447,7 @@ static struct i2c_driver elan_touch_driver = {
 	.driver = {
 		   .name = "elan-touch",
 		   .owner = THIS_MODULE,
+		   .of_match_table = elan_dt_ids,
 #ifdef CONFIG_PM
 		   .pm = &elan_dev_pm_ops,
 #endif

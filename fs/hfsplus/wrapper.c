@@ -56,7 +56,7 @@ int hfsplus_submit_bio(struct super_block *sb, sector_t sector,
 	DECLARE_COMPLETION_ONSTACK(wait);
 	struct bio *bio;
 	int ret = 0;
-	unsigned int io_size;
+	u64 io_size;
 	loff_t start;
 	int offset;
 
@@ -156,7 +156,7 @@ static int hfsplus_get_last_session(struct super_block *sb,
 			*start = (sector_t)te.cdte_addr.lba << 2;
 			return 0;
 		}
-		printk(KERN_ERR "hfs: invalid session number or type of track\n");
+		pr_err("invalid session number or type of track\n");
 		return -EINVAL;
 	}
 	ms_info.addr_format = CDROM_LBA;
@@ -184,10 +184,6 @@ int hfsplus_read_wrapper(struct super_block *sb)
 
 	if (hfsplus_get_last_session(sb, &part_start, &part_size))
 		goto out;
-	if ((u64)part_start + part_size > 0x100000000ULL) {
-		pr_err("hfs: volumes larger than 2TB are not supported yet\n");
-		goto out;
-	}
 
 	error = -ENOMEM;
 	sbi->s_vhdr_buf = kmalloc(hfsplus_min_io_size(sb), GFP_KERNEL);
@@ -215,8 +211,9 @@ reread:
 		if (!hfsplus_read_mdb(sbi->s_vhdr, &wd))
 			goto out_free_backup_vhdr;
 		wd.ablk_size >>= HFSPLUS_SECTOR_SHIFT;
-		part_start += wd.ablk_start + wd.embed_start * wd.ablk_size;
-		part_size = wd.embed_count * wd.ablk_size;
+		part_start += (sector_t)wd.ablk_start +
+			       (sector_t)wd.embed_start * wd.ablk_size;
+		part_size = (sector_t)wd.embed_count * wd.ablk_size;
 		goto reread;
 	default:
 		/*
@@ -237,8 +234,7 @@ reread:
 
 	error = -EINVAL;
 	if (sbi->s_backup_vhdr->signature != sbi->s_vhdr->signature) {
-		printk(KERN_WARNING
-			"hfs: invalid secondary volume header\n");
+		pr_warn("invalid secondary volume header\n");
 		goto out_free_backup_vhdr;
 	}
 
@@ -262,8 +258,7 @@ reread:
 		blocksize >>= 1;
 
 	if (sb_set_blocksize(sb, blocksize) != blocksize) {
-		printk(KERN_ERR "hfs: unable to set blocksize to %u!\n",
-			blocksize);
+		pr_err("unable to set blocksize to %u!\n", blocksize);
 		goto out_free_backup_vhdr;
 	}
 

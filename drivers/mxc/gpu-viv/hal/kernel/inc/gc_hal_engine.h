@@ -323,50 +323,6 @@ gcoSURF_Resolve(
     IN gcoSURF DestSurface
     );
 
-/* Export the render target. */
-gceSTATUS
-gcoSURF_ExportRenderTarget(
-    IN gcoSURF SrcSurface
-);
-
-/* Import the render target. */
-gceSTATUS
-gcoSURF_ImportRenderTarget(
-    IN gctUINT32 Pid,
-    IN gcoSURF SrcSurface
-);
-
-/* Save the Resolve info to kernel. */
-gceSTATUS
-gcoSURF_PrepareRemoteResolveRect(
-    IN gcoSURF SrcSurface,
-    IN gcsPOINT_PTR SrcOrigin,
-    IN gcsPOINT_PTR DestOrigin,
-    IN gcsPOINT_PTR RectSize
-    );
-
-/* Resolve using the rectangle info previously saved in the vid mem node. */
-gceSTATUS
-gcoSURF_ResolveFromStoredRect(
-    IN gcoSURF SrcSurface,
-    IN gcoSURF DestSurface
-    );
-
-/* Using the info that Process Pid saved to do resolve. */
-gceSTATUS
-gcoSURF_RemoteResolveRect(
-    IN gcoSURF SrcSurface,
-    IN gcoSURF DestSurface,
-    IN gctBOOL *resolveDiscarded
-    );
-
-/* Return the "resolve submitted indicator" signal. */
-gceSTATUS
-gcoSURF_GetRTSignal(
-    IN gcoSURF RTSurface,
-    OUT gctSIGNAL * resolveSubmittedSignal
-    );
-
 /* Resolve rectangular area of a surface. */
 gceSTATUS
 gcoSURF_ResolveRect(
@@ -1430,6 +1386,16 @@ typedef enum _gceTEXTURE_FACE
 }
 gceTEXTURE_FACE;
 
+#if gcdFORCE_MIPMAP
+typedef enum
+{
+    gcvForceMipDisabled  = 0,
+    gcvForceMipEnable    = 1,
+    gcvForceMipGenerated = 2,
+    gcvForceMipNever     = 3,
+}gceFORCE_MIPMAP;
+#endif
+
 typedef struct _gcsTEXTURE
 {
     /* Addressing modes. */
@@ -1446,6 +1412,10 @@ typedef struct _gcsTEXTURE
     gceTEXTURE_FILTER           mipFilter;
     gctUINT                     anisoFilter;
     gctBOOL                     forceTopLevel;
+    gctBOOL                     autoMipmap;
+#if gcdFORCE_MIPMAP
+    gceFORCE_MIPMAP             forceMipmap;
+#endif
     /* Level of detail. */
     gctFIXED_POINT              lodBias;
     gctFIXED_POINT              lodMin;
@@ -1479,7 +1449,18 @@ gceSTATUS
 gcoTEXTURE_Destroy(
     IN gcoTEXTURE Texture
     );
+#if gcdFORCE_MIPMAP
+gceSTATUS
+gcoTEXTURE_DestroyForceMipmap(
+    IN gcoTEXTURE Texture
+    );
 
+gceSTATUS
+gcoTEXTURE_GetMipLevels(
+    IN gcoTEXTURE Texture,
+    OUT gctINT * levels
+    );
+#endif
 /* Replace a mipmap in gcoTEXTURE object. */
 gceSTATUS
 gcoTEXTURE_ReplaceMipMap(
@@ -1654,6 +1635,12 @@ gcoTEXTURE_RenderIntoMipMap(
 
 gceSTATUS
 gcoTEXTURE_IsRenderable(
+    IN gcoTEXTURE Texture,
+    IN gctUINT Level
+    );
+
+gceSTATUS
+gcoTEXTURE_IsRenderableEx(
     IN gcoTEXTURE Texture,
     IN gctUINT Level
     );
@@ -2003,21 +1990,15 @@ gceSTATUS
 gcoHAL_GetSharedInfo(
     IN gctUINT32 Pid,
     IN gctUINT32 DataId,
-    OUT gctUINT8_PTR Data,
     IN gctSIZE_T Bytes,
-    IN gctUINT64 Node,
-    OUT gctUINT8_PTR NodeData,
-    IN gceVIDMEM_NODE_SHARED_INFO_TYPE SharedInfoType
+    OUT gctPOINTER Data
     );
 
 gceSTATUS
 gcoHAL_SetSharedInfo(
     IN gctUINT32 DataId,
-    IN gctUINT8_PTR Data,
-    IN gctSIZE_T Bytes,
-    IN gctUINT64 Node,
-    IN gctUINT8_PTR NodeData,
-    IN gceVIDMEM_NODE_SHARED_INFO_TYPE SharedInfoType
+    IN gctPOINTER Data,
+    IN gctSIZE_T Bytes
     );
 
 #ifdef __cplusplus

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004-2010 Atheros Communications Inc.
+ * Copyright (c) 2011 Qualcomm Atheros, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -19,8 +20,12 @@
 
 #define AR6003_BOARD_DATA_SZ		1024
 #define AR6003_BOARD_EXT_DATA_SZ	768
+#define AR6003_BOARD_EXT_DATA_SZ_V2	1024
 
-#define RESET_CONTROL_ADDRESS		0x00000000
+#define AR6004_BOARD_DATA_SZ     6144
+#define AR6004_BOARD_EXT_DATA_SZ 0
+
+#define RESET_CONTROL_ADDRESS		0x00004000
 #define RESET_CONTROL_COLD_RST		0x00000100
 #define RESET_CONTROL_MBOX_RST		0x00000004
 
@@ -40,6 +45,7 @@
 #define LPO_CAL_ENABLE_S		20
 #define LPO_CAL_ENABLE			0x00100000
 
+#define GPIO_PIN9_ADDRESS		0x0000004c
 #define GPIO_PIN10_ADDRESS		0x00000050
 #define GPIO_PIN11_ADDRESS		0x00000054
 #define GPIO_PIN12_ADDRESS		0x00000058
@@ -135,7 +141,8 @@
  * between the two, and is intended to remain constant (with additions only
  * at the end).
  */
-#define ATH6KL_HI_START_ADDR           0x00540600
+#define ATH6KL_AR6003_HI_START_ADDR           0x00540600
+#define ATH6KL_AR6004_HI_START_ADDR           0x00400800
 
 /*
  * These are items that the Host may need to access
@@ -300,6 +307,11 @@ struct host_interest {
 #define HI_OPTION_FW_MODE_BSS_STA 0x1
 #define HI_OPTION_FW_MODE_AP      0x2
 
+#define HI_OPTION_FW_SUBMODE_NONE      0x0
+#define HI_OPTION_FW_SUBMODE_P2PDEV    0x1
+#define HI_OPTION_FW_SUBMODE_P2PCLIENT 0x2
+#define HI_OPTION_FW_SUBMODE_P2PGO     0x3
+
 #define HI_OPTION_NUM_DEV_SHIFT   0x9
 
 #define HI_OPTION_FW_BRIDGE_SHIFT 0x04
@@ -311,21 +323,34 @@ struct host_interest {
 |   (2)   |   (2)   |   (2)   |   (2)   |   (2)   |   (2)   |   (2)   |   (2)
 |------------------------------------------------------------------------------|
 */
+#define HI_OPTION_FW_MODE_BITS	       0x2
 #define HI_OPTION_FW_MODE_SHIFT        0xC
 
+#define HI_OPTION_FW_SUBMODE_BITS      0x2
+#define HI_OPTION_FW_SUBMODE_SHIFT     0x14
+
 /* Convert a Target virtual address into a Target physical address */
-#define TARG_VTOP(vaddr)   (vaddr & 0x001fffff)
+#define AR6003_VTOP(vaddr) ((vaddr) & 0x001fffff)
+#define AR6004_VTOP(vaddr) (vaddr)
 
-#define AR6003_REV2_APP_START_OVERRIDE          0x944C00
-#define AR6003_REV2_APP_LOAD_ADDRESS            0x543180
-#define AR6003_REV2_BOARD_EXT_DATA_ADDRESS      0x57E500
-#define AR6003_REV2_DATASET_PATCH_ADDRESS       0x57e884
-#define AR6003_REV2_RAM_RESERVE_SIZE            6912
+#define TARG_VTOP(target_type, vaddr) \
+	(((target_type) == TARGET_TYPE_AR6003) ? AR6003_VTOP(vaddr) : \
+	(((target_type) == TARGET_TYPE_AR6004) ? AR6004_VTOP(vaddr) : 0))
 
-#define AR6003_REV3_APP_START_OVERRIDE          0x945d00
-#define AR6003_REV3_APP_LOAD_ADDRESS            0x545000
-#define AR6003_REV3_BOARD_EXT_DATA_ADDRESS      0x542330
-#define AR6003_REV3_DATASET_PATCH_ADDRESS       0x57FF74
-#define AR6003_REV3_RAM_RESERVE_SIZE            512
+#define ATH6KL_FWLOG_PAYLOAD_SIZE		1500
+
+struct ath6kl_dbglog_buf {
+	__le32 next;
+	__le32 buffer_addr;
+	__le32 bufsize;
+	__le32 length;
+	__le32 count;
+	__le32 free;
+} __packed;
+
+struct ath6kl_dbglog_hdr {
+	__le32 dbuf_addr;
+	__le32 dropped;
+} __packed;
 
 #endif
