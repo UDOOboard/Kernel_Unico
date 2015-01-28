@@ -1,0 +1,85 @@
+/*
+ * Copyright 2013 Freescale Semiconductor, Inc.
+ *
+ * Author: Fabio Estevam <fabio.estevam <at> freescale.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ */
+
+/dts-v1/;
+#include "imx6q.dtsi"
+#include "imx6qdl-udoo.dtsi"
+
+/ {
+	model = "Udoo i.MX6 Quad Board";
+	compatible = "fsl,imx6q-udoo", "fsl,imx6q";
+
+	memory {
+		reg = <0x10000000 0x40000000>;
+	};
+	regulators {
+                compatible = "simple-bus";
+
+                reg_2p5v: 2p5v {
+                        compatible = "regulator-fixed";
+                        regulator-name = "2P5V";
+                        regulator-min-microvolt = <2500000>;
+                        regulator-max-microvolt = <2500000>;
+                        regulator-always-on;
+                };
+
+                reg_3p3v: 3p3v {
+                        compatible = "regulator-fixed";
+                        regulator-name = "3P3V";
+                        regulator-min-microvolt = <3300000>;
+                        regulator-max-microvolt = <3300000>;
+                        regulator-always-on;
+                };
+
+                reg_usb_otg_vbus: usb_otg_vbus {
+                        compatible = "regulator-fixed";
+                        regulator-name = "usb_otg_vbus";
+                        regulator-min-microvolt = <5000000>;
+                        regulator-max-microvolt = <5000000>;
+                        enable-active-high;
+                };
+
+//		reg_usb_h1_vbus: regulator@0 {
+//			compatible = "regulator-fixed";
+//			reg = <0>;
+//			regulator-name = "usb_h1_vbus";
+//			regulator-min-microvolt = <5000000>;
+//			regulator-max-microvolt = <5000000>;
+//			enable-active-high;
+//			startup-delay-us = <2>; /* USB2415 requires a POR of 1 us minimum */
+//			gpio = <&gpio7 12 0>;
+//		};
+        };
+};
+
+&usbh1 { /* USB1 */
+	vbus-supply = <&reg_usb_h1_vbus>;
+	clocks = <&clks 201>;
+	clock-names = "phy";
+	status = "okay";
+};
+
+&sata {
+	status = "okay";
+};
+
+&uart2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_uart2_1>;
+	status = "okay";
+};
+
+&usdhc3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_usdhc3_2>;
+	non-removable;
+	status = "okay";
+};
